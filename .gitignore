@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.tar.gz
+
+# Never commit runtime secrets or local recovery material.
+.env
+.env.*
+*.key
+*.pem
+*.sql
+*.sqlite*
+restore-points/

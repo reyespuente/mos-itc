@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from mos_itc.cli import main
+
+raise SystemExit(main())
