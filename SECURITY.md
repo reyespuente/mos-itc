@@ -8,6 +8,14 @@ Report vulnerabilities privately to the repository owner using GitHub private
 vulnerability reporting once it is enabled. No contact address is invented here.
 Do not open public issues containing keys, passwords, dumps or exploit details.
 
+## SSH administrators
+
+Accounts explicitly created through the administrator menu receive unrestricted
+sudo with password authentication. Treat them as trusted server owners. MOS does
+not store their passwords or pass them in command arguments. Creation preserves
+SSH authentication policy and requires a public key when password login is disabled.
+Website accounts do not receive these privileges. Root is not disabled automatically.
+
 ## Boundaries
 
 * Root owns the installed code, system configuration and state. No blanket sudoers

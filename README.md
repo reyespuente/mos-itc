@@ -7,7 +7,7 @@ Created by **Reyes Guadalupe Puente Balcazar** as an initiative at the Instituto
 Tecnológico de Celaya to make server administration easier from one place.
 Free to use under the MIT license. This is not a claim of official ITC endorsement.
 
-**Version: 0.2.0-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
+**Version: 0.2.1-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
 distribution matrix has not yet been validated.
 
 The terminal banner uses ITC's published blue `#1B396A` and green `#117533`:
@@ -86,17 +86,14 @@ permissions, ownership, service state and required package versions before copyi
 anything back. Use Restic for website/database data and a provider snapshot when
 full-machine rollback is required. Keep restore points private: `/etc` contains keys.
 
-Once **you create and publish the GitHub repository**, a standalone copy of the
-installer can fetch the source automatically:
+A standalone copy of the installer can fetch a published release automatically:
 
 ```bash
-# Replace OWNER/REPOSITORY and RELEASE_TAG_OR_COMMIT with your actual values.
-sudo bash install.sh --repo OWNER/REPOSITORY --ref RELEASE_TAG_OR_COMMIT
+sudo bash install.sh --repo reyespuente/mos-itc --ref v0.2.1-beta.1
 ```
 
 Download the installer as a file before running it. Interactive input is required;
-`curl | bash` is intentionally refused. Prefer a reviewed release/commit. This
-project does not yet have a public GitHub URL, signed releases or an update service.
+`curl | bash` is intentionally refused. Prefer a reviewed release/commit. Source: https://github.com/reyespuente/mos-itc. Releases are not signed; there is no automatic update service.
 
 ## Features
 
@@ -109,6 +106,7 @@ project does not yet have a public GitHub URL, signed releases or an update serv
 | SSL certificates | HTTP, Let's Encrypt HTTP-01, custom PEM with optional CA bundle, shared wildcard assignments, expiry warnings |
 | Automatic configuration | Timezone, hostname, PHP CLI default, production PHP settings, Apache hardening, scheduled metrics and scans |
 | Security | UFW rules preserving existing rules, Fail2ban SSH jail, scheduled/manual ClamAV reports |
+| SSH administrators | Create local SSH accounts with password-required full sudo; change passwords and add public keys |
 | SSH | Public keys, per-site SSH/SFTP access, configurable port and password authentication, automatic rollback |
 | Performance | Live CPU/RAM/disk bars, network counters, active services and hourly history for seven days |
 | Backups | Restic encryption/incremental snapshots using Rclone, SFTP or S3-compatible storage; database dumps and daily scheduling |
@@ -162,18 +160,29 @@ directives, TLS or existing database credentials, and needs a separate backup.
 
 ### Certificates
 
-Paste the **certificate**, **private key**, and optional **intermediate CA bundle**
-into nano when prompted. RSA describes a key algorithm; PEM is the text encoding,
-so an RSA key can be imported as PEM. A standalone public key is not a certificate.
-Both RSA and EC private keys are accepted. Encrypted keys requiring an interactive
-passphrase are refused for unattended Apache startup. Custom chains must validate
-against the server trust store.
+The certificate form shows separate fields for the **certificate**, **private key**,
+and optional **intermediate CA bundle**. Select a field to paste/edit PEM in nano
+or import an existing file from the server. A fullchain is split automatically.
+Review public certificate details and affected sites before applying; private keys
+are never shown in summaries. Invalid input keeps the draft for correction.
+Both RSA and EC private keys are accepted. Encrypted private keys are refused for
+unattended Apache startup. Chains must validate against the server trust store.
+Replacement checks Apache and restores the previous files/state if reload fails.
 
 A custom wildcard can be assigned to multiple matching domains. Replacement checks
 all existing assignments before saving. Warnings appear within 30 days of expiry.
 Let's Encrypt issuance uses HTTP-01: real DNS and externally accessible TCP/80 are
 required. Custom wildcards are supported; automated DNS-01 wildcard issuance is
 not included. Renewals use Certbot's timer and a configuration-checking deploy hook.
+
+### SSH administrators
+
+Use **SSH administrators** or `sudo mos-itc users` to create an account with a
+home directory, Bash and full sudo requiring its password. Enter the password
+twice and optionally add a public SSH key. A key is required when the SSH daemon
+disables password login. Passwords are not stored in MOS state or command arguments.
+Existing local administrators can receive new keys or password changes. Site
+accounts and root are excluded. Creating an account does not change SSH policy.
 
 ### SSH recovery
 
@@ -257,6 +266,7 @@ mos_itc/
   core.py                Process/file boundary, locks, APT planning
   i18n.py                Catalog loading and English fallback
   web.py                 Sites, PHP-FPM, databases, certificates
+  users.py               Local SSH administrators and password-required sudo
   ops.py                 Security, SSH, telemetry, backups, deployment
   ui.py                  Screen flows, forms and result cards
   terminal.py            Shared curses navigation, inputs and review widgets
@@ -276,7 +286,7 @@ Author: Reyes Guadalupe Puente Balcazar. License: [MIT](LICENSE).
 
 ## Publishing
 
-Create an empty GitHub repository, then upload this directory including `.github/`.
+Publish changes to https://github.com/reyespuente/mos-itc including `.github/`.
 Exclude runtime files and credentials; `.gitignore` is included. The GitHub
 installer accepts your actual repository and release/commit through `--repo` and
-`--ref`. No repository URL is invented or published by this delivery.
+`--ref`. Push the release tag before using it with the installer.

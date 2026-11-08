@@ -26,6 +26,9 @@ class Preview(System):
 
     def __init__(self):
         super().__init__(dry=True)
+        self.overlay[str(core.STATE / "state.json")] = json.dumps(
+            {"sites": {}, "certificates": {}, "language": "en"}
+        )
         self.calls = []
 
     def run(self, args, **kwargs):

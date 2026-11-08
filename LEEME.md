@@ -3,7 +3,7 @@
 Herramienta de terminal creada por **Reyes Guadalupe Puente Balcazar** como una
 iniciativa en el Instituto Tecnológico de Celaya. Licencia MIT, de libre uso.
 
-Esta es la **versión 0.2.0-beta.1**. Prueba la instalación completa en una VM
+Esta es la **versión 0.2.1-beta.1**. Prueba la instalación completa en una VM
 desechable antes de utilizarla en un VPS con datos reales.
 
 ## Abrir los menús en Linux Mint sin instalar servicios
@@ -72,7 +72,7 @@ conservan. El instalador inicial muestra textos bilingües antes de instalar Pyt
 La guía completa está en [README.md](README.md), las pruebas de aceptación de VM
 en [TESTING.md](TESTING.md), y los límites de seguridad en [SECURITY.md](SECURITY.md).
 Se validó la instalación y operación en Ubuntu 26.04.1; las demás versiones
-de Debian/Ubuntu aún requieren sus propias pruebas de aceptación. El código todavía no se ha publicado en GitHub.
+de Debian/Ubuntu aún requieren sus propias pruebas de aceptación. Repositorio: https://github.com/reyespuente/mos-itc.
 
 ## Interfaz, bienvenida SSH y recuperación
 
@@ -99,3 +99,16 @@ Las versiones de PHP se descubren desde APT, sin un límite de rama fijo. Las
 actualizaciones se simulan y el plan se vuelve a comprobar antes de aplicar.
 Consulta TEST_RESULTS.md para las pruebas reales de esta entrega; las futuras
 versiones con cambios incompatibles deben validarse antes en una VM.
+
+## Certificados y administradores SSH
+
+El formulario de certificados separa certificado, clave privada y cadena CA.
+En cada campo puedes pegar el PEM en nano o importar un archivo del servidor.
+Un fullchain se separa automáticamente. Antes de guardar se revisan la vigencia,
+la clave, la cadena y los dominios afectados. Los errores conservan el borrador;
+si Apache no recarga, se recuperan los archivos y el inventario anteriores.
+
+En **Administradores SSH** puedes crear usuarios con carpeta personal, Bash y
+sudo completo que requiere su contraseña. También puedes cambiar contraseñas
+y agregar claves públicas. Si SSH no permite contraseñas, se exige una clave.
+La app no cambia esa política ni deshabilita root. Comando: `sudo mos-itc users`.

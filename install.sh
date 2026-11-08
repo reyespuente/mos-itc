@@ -153,7 +153,7 @@ flock -n 9 || { echo 'A MOS operation is running. Close MOS and try again.'; exi
 app_stage="$(mktemp -d /opt/.mos-itc-stage-XXXXXXXX)"
 chmod 0755 "$app_stage"
 install -d -m 0755 "$app_stage/mos_itc" "$app_stage/languages" "$app_stage/assets"
-for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py; do
+for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py users.py; do
     [[ -f "$source_dir/mos_itc/$file" && ! -L "$source_dir/mos_itc/$file" ]] || { echo "Missing or unsafe file: $file"; exit 1; }
     install -m 0644 "$source_dir/mos_itc/$file" "$app_stage/mos_itc/$file"
 done

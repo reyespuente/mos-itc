@@ -227,7 +227,13 @@ class Terminal:
                 if self.win.getch() in (27, ord("q")):
                     return None
                 continue
-            self.draw_menu(title, rows, pos, checked, detail)
+            self.draw_menu(
+                title,
+                rows,
+                pos,
+                checked,
+                detail.get(rows[pos], "") if isinstance(detail, dict) else detail,
+            )
             key = self.win.getch()
             if key in (27, ord("q"), curses.KEY_LEFT):
                 return None

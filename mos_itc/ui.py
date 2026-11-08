@@ -15,7 +15,7 @@ import sys as python_sys
 import tempfile
 import textwrap
 
-from . import core, web, ops, recovery
+from . import core, web, ops, recovery, users
 from .core import Error, STATE, CONF, SITES
 from .i18n import Translator
 from .terminal import Terminal, Cancelled, WORDMARK, INSTITUTE, DISPLAY_AUTHOR, clean
@@ -89,9 +89,9 @@ class UI:
         else:
             print(text)
 
-    def menu(self, title, options, selected=None):
+    def menu(self, title, options, selected=None, details=None):
         if self.terminal:
-            return self.terminal.menu(title, options, selected)
+            return self.terminal.menu(title, options, selected, detail=details or "")
         print("\n" + self.t(title))
         for i, option in enumerate(options):
             print(f" {i+1}. {self.t(option)}")
@@ -188,8 +188,10 @@ class UI:
             self.sys.write(p, initial)
             # --ignorercfiles / restricted: don't execute user editor configuration.
             if self.terminal:
+                self.terminal.win.refresh()
                 curses.def_prog_mode()
-                curses.endwin()
+                if not curses.isendwin():
+                    curses.endwin()
             try:
                 result = subprocess.run(
                     ["nano", "--ignorercfiles", "--restricted", str(p)],
@@ -198,7 +200,12 @@ class UI:
             finally:
                 if self.terminal:
                     curses.reset_prog_mode()
+                    curses.curs_set(0)
+                    self.terminal.win.clearok(True)
                     self.terminal.win.touchwin()
+                    # reset_prog_mode restores tty settings; refresh also leaves
+                    # curses' ended state before another editor is launched.
+                    self.terminal.win.refresh()
             if result.returncode:
                 raise Error("error_editor_cancelled")
             if p.is_symlink():
@@ -697,61 +704,186 @@ class UI:
             ],
         )
 
-    def ssl_action(self, choice):
-        # Expiry is recomputed, never taken from stale import metadata.
-        inventory = self.sys.data()["certificates"]
-        expiring = False
-        for label in inventory:
-            p = CONF / "certificates" / label / "cert.pem"
-            if p.exists():
-                info = web.certificate_info(self.sys, p)
-                if info["days_left"] is not None and info["days_left"] <= 30:
-                    expiring = True
-                    print(
-                        self.t(
-                            "certificate_expiry_warning",
-                            name=label,
-                            days=info["days_left"],
-                        )
-                    )
-        if expiring:
-            self.notify("ui_expiring_certificates")
-        if choice == 0:
-            rows = []
-            for label, info in inventory.items():
-                p = CONF / "certificates" / label / "cert.pem"
-                rows.append(
-                    {
-                        "certificate": label,
-                        **(web.certificate_info(self.sys, p) if p.exists() else info),
-                    }
+    def certificate_summary(self, label, info):
+        sites = web.certificate_users(self.sys, label)
+        fields = [
+            ("certificate_name", label),
+            ("cert_domains", ", ".join(info.get("domains", [])) or "—"),
+            ("cert_subject", info.get("subject", "—")),
+            ("cert_issuer", info.get("issuer", "—")),
+            ("cert_valid_from", info.get("valid_from", "—")),
+            ("cert_expires", info.get("expires", "—")),
+            ("cert_fingerprint", info.get("fingerprint", "—")),
+            (
+                "cert_assigned_sites",
+                ", ".join(site["domain"] for site in sites) or self.t("cert_unused"),
+            ),
+        ]
+        return "\n".join(f"{self.t(key)}: {value}" for key, value in fields)
+
+    def certificate_inventory(self):
+        while True:
+            labels = sorted(self.sys.data()["certificates"])
+            inventory = {}
+            certificate_rows = []
+            for label in labels:
+                cert_path = CONF / "certificates" / label / "cert.pem"
+                info = (
+                    web.certificate_info(self.sys, cert_path)
+                    if cert_path.exists()
+                    else self.sys.data()["certificates"][label]
                 )
-            for site in self.sys.data()["sites"].values():
-                row = {
-                    "domain": site["domain"],
-                    "security": site["ssl"],
-                    "certificate": site.get("certificate", ""),
-                }
-                if site["ssl"] == "letsencrypt" and not self.sys.dry:
-                    row.update(
-                        web.certificate_info(self.sys, web.tls_paths(self.sys, site)[0])
+                inventory[label] = info
+                days = info.get("days_left")
+                expiry = (
+                    self.t("cert_expired")
+                    if days is not None and days < 0
+                    else (
+                        self.t("cert_expires_days", days=days)
+                        if days is not None
+                        else self.t("cert_unknown_expiry")
                     )
-                rows.append(row)
-            self.show(json.dumps(rows, indent=2))
+                )
+                certificate_rows.append(
+                    self.t("cert_inventory_row", name=label, expiry=expiry)
+                )
+            rows = ["cert_domain_security"] + certificate_rows + ["back"]
+            choice = self.menu("certificate_inventory", rows)
+            if choice is None or choice == len(rows) - 1:
+                return
+            if choice == 0:
+                lines = [
+                    f'{site["domain"]}  |  {site["ssl"]}  |  {site.get("certificate") or "—"}'
+                    for site in self.sys.data()["sites"].values()
+                ]
+                self.show(
+                    "\n".join(lines) or self.t("no_websites_yet"),
+                    "cert_domain_security",
+                )
+                continue
+            label = labels[choice - 1]
+            info = inventory[label]
+            days = info.get("days_left")
+            summary = self.certificate_summary(label, info)
+            if days is not None and days <= 30:
+                summary = (
+                    self.t("certificate_expiry_warning", name=label, days=days)
+                    + "\n\n"
+                    + summary
+                )
+            action = self.menu(
+                label,
+                ["cert_view_details", "cert_replace", "cert_assign", "back"],
+                details={
+                    key: summary
+                    for key in ("cert_view_details", "cert_replace", "cert_assign")
+                },
+            )
+            if action == 0:
+                self.show(summary, label)
+            elif action == 1:
+                self.certificate_import_form(label)
+            elif action == 2:
+                site = self.select_site()
+                if site and self.confirm(
+                    self.t(
+                        "confirm_assign_certificate",
+                        certificate=label,
+                        domain=site["domain"],
+                    ),
+                    details=summary,
+                ):
+                    web.apply_site(
+                        self.sys, {**site, "ssl": "custom", "certificate": label}, site
+                    )
+
+    def certificate_import_form(self, label):
+        values = list(web.certificate_contents(self.sys, label))
+        fields = ["certificate_pem", "private_key_pem", "ca_bundle_pem_optional"]
+        hints = ["cert_certificate_help", "cert_key_help", "cert_chain_help"]
+        while True:
+            rows = [
+                self.t(
+                    "cert_field_status",
+                    field=self.t(field),
+                    status=self.t(
+                        "cert_ready"
+                        if value.strip()
+                        else "cert_optional_empty" if index == 2 else "cert_missing"
+                    ),
+                )
+                for index, (field, value) in enumerate(zip(fields, values))
+            ]
+            rows += ["cert_validate_save", "ui_cancel"]
+            details = {row: self.t(hint) for row, hint in zip(rows, hints)}
+            details["cert_validate_save"] = self.t("cert_review_help")
+            choice = self.menu(label, rows, details=details)
+            if choice in (None, 4):
+                return
+            if choice < 3:
+                mode = self.menu(
+                    fields[choice],
+                    ["cert_paste_nano", "cert_import_file", "cert_clear", "back"],
+                    details={
+                        "cert_paste_nano": self.t(hints[choice]),
+                        "cert_import_file": self.t(hints[choice]),
+                    },
+                )
+                try:
+                    if mode == 0:
+                        values[choice] = self.editor(fields[choice], values[choice])
+                    elif mode == 1:
+                        path = self.ask(
+                            self.t("cert_path_for", field=self.t(fields[choice]))
+                        )
+                        values[choice] = web.read_pem_file(path)
+                    elif mode == 2:
+                        values[choice] = ""
+                    if choice == 0 and values[0].strip():
+                        leaf, embedded_chain = web.normalize_certificates(values[0])
+                        if embedded_chain:
+                            values[0], values[2] = leaf, embedded_chain
+                except (Error, ValueError, OSError) as exc:
+                    self.show(
+                        exc.render(self.lang) if isinstance(exc, Error) else str(exc),
+                        "error",
+                    )
+                continue
+            if not values[0].strip() or not values[1].strip():
+                self.show(self.t("cert_required_fields"), "error")
+                continue
+            try:
+                metadata = web.validate_certificate(self.sys, *values, label=label)
+                summary = self.certificate_summary(label, metadata)
+                if not self.confirm(
+                    self.t("confirm_certificate_import", certificate=label),
+                    details=summary,
+                ):
+                    continue
+                web.import_certificate(self.sys, label, *values)
+            except Error as exc:
+                self.show(
+                    self.t("cert_validation_failed") + "\n\n" + exc.render(self.lang),
+                    "error",
+                )
+                continue
+            self.notify(self.t("cert_saved", name=label))
+            return
+
+    def ssl_action(self, choice):
+        if choice == 0:
+            self.certificate_inventory()
         elif choice == 1:
-            label = core.name(self.ask("certificate_name"))
-            existing = CONF / "certificates" / label
-            cert = self.editor("certificate_pem", self.sys.read(existing / "cert.pem"))
-            key = self.editor("private_key_pem", self.sys.read(existing / "key.pem"))
-            bundle = self.editor("ca_bundle_pem_optional")
-            if self.confirm(self.t("confirm_certificate_import", certificate=label)):
-                web.import_certificate(self.sys, label, cert, key, bundle)
+            self.certificate_import_form(core.name(self.ask("certificate_name")))
         elif choice == 2:
             self.configure_ssl()
         elif choice == 3 and self.confirm(
             "run_certbot_renew_only_certificates_due_for_renewal"
         ):
-            print(self.sys.run(["certbot", "renew"], mutate=True, timeout=1800))
+            self.show(
+                self.sys.run(["certbot", "renew"], mutate=True, timeout=1800),
+                "ssl_certificates",
+            )
 
     def apply_security(self):
         ports = ops.ssh_ports(self.sys)
@@ -1033,6 +1165,69 @@ class UI:
         elif not args:
             self.notify("ui_no_updates")
 
+    def administrator_password(self):
+        password = self.ask("users_password", secret=True)
+        if password != self.ask("repeat_password", secret=True):
+            raise Error("passwords_do_not_match")
+        return users.validate_password(password)
+
+    def create_administrator(self):
+        missing = [
+            package
+            for package in ("sudo", "openssh-server")
+            if not core.installed(self.sys, package)
+        ]
+        if missing:
+            core.refresh(self.sys)
+            args, plan = core.apt_plan(self.sys, missing)
+            if not self.confirm("users_install_dependencies", details=plan):
+                return
+            core.apply_packages(self.sys, args)
+        username = core.name(self.ask("linux_user"))
+        password = self.administrator_password()
+        needs_key = not users.password_login_allowed(self.sys)
+        if needs_key:
+            self.show(self.t("users_key_required"), "admin_users")
+        public_key = (
+            self.ask("public_key") if needs_key or self.yes("users_add_key") else ""
+        )
+        if not self.confirm(self.t("users_confirm_create", username=username)):
+            return
+        account = users.create_administrator(self.sys, username, password, public_key)
+        port = ops.ssh_ports(self.sys)[0]
+        self.show(
+            self.t("users_created", username=account["username"], port=port),
+            "admin_users",
+        )
+
+    def administrator_actions(self, account):
+        username = account["username"]
+        action = self.menu(
+            username, ["add_public_ssh_key", "users_change_password", "back"]
+        )
+        if action == 0:
+            key = self.ask("public_key")
+            if self.confirm(self.t("add_public_ssh_key_for_user", user=username)):
+                users.add_public_key(self.sys, username, key)
+        elif action == 1:
+            password = self.administrator_password()
+            if self.confirm(self.t("users_confirm_password", username=username)):
+                users.change_password(self.sys, username, password)
+
+    def admin_users(self):
+        while True:
+            accounts = users.administrators(self.sys)
+            choice = self.menu(
+                "admin_users",
+                ["users_create"] + [a["username"] for a in accounts] + ["back"],
+            )
+            if choice is None or choice == len(accounts) + 1:
+                return
+            if choice == 0:
+                self.perform(self.create_administrator)
+            else:
+                self.perform(lambda: self.administrator_actions(accounts[choice - 1]))
+
     def security_center(self):
         self.section(
             "ui_security_access",
@@ -1131,6 +1326,7 @@ class UI:
             ("ui_overview", self.overview),
             ("websites", self.websites),
             ("ui_software", self.software),
+            ("admin_users", self.admin_users),
             ("ui_security_access", self.security_center),
             ("backups", self.backups),
             ("view_performance", self.performance),
@@ -1150,6 +1346,7 @@ class UI:
                     self.security_center,
                     self.settings,
                     self.websites,
+                    self.admin_users,
                     self.backups,
                     self.performance,
                 ):

@@ -1,3 +1,25 @@
+# Validation record — 0.2.1-beta.1
+
+Checked on November 8, 2026. Local offline suite: **63 passed, no skips**,
+including Python 3.9 syntax, catalog parity, OpenSSL chain/key checks, rollback
+and native PTY/nano repeated-editor regression.
+
+On the authorized Ubuntu 26.04.1 KVM guest (`192.168.122.39`, Python 3.14):
+
+* Installer upgrade to 0.2.1-beta.1 preserved existing sites and created a recovery point.
+* All 20 certificate/administrator regression tests passed, including three
+  consecutive real nano sessions and real visudo validation.
+* Replaced the wildcard certificate shared by two existing sites; Apache reloaded
+  and both trusted HTTPS requests returned 200. Private key permissions were 0600.
+* Created a temporary Bash/home/sudo administrator, connected over SSH using its
+  public key, and verified password-required sudo before and after password change.
+* Removed the temporary account and sudo policy, restored the scheduled ClamAV
+  scan and refreshed metrics. No server services were installed on the Mint host.
+
+The real server has not been updated by these checks. Public Let's Encrypt,
+other operating-system releases and future upstream changes remain outside this
+validation. The previous release's broader acceptance record follows.
+
 # Validation record — 0.2.0-beta.1
 
 Validated on the explicitly authorized local Ubuntu 26.04.1 KVM guest. The Linux

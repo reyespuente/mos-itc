@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import os
+import stat
 import tempfile
 
 from .core import (
@@ -371,87 +373,174 @@ def letsencrypt(sys, site, email):
     sys.run(["systemctl", "enable", "--now", "certbot.timer"], mutate=True)
 
 
+MAX_PEM_BYTES = 1024 * 1024
+
+
+def read_pem_file(value):
+    """Read a selected regular file; never wait on a FIFO or read unlimited data."""
+    try:
+        path = Path(value).expanduser().resolve(strict=True)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise Error("cert_file_required")
+            content = source.read(MAX_PEM_BYTES + 1)
+        if len(content) > MAX_PEM_BYTES:
+            raise Error("cert_file_too_large")
+        return content.decode("utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise Error("cert_file_unreadable") from exc
+
+
+def normalize_certificates(cert_text, chain_text=""):
+    def blocks(text, required):
+        text = text.lstrip("\ufeff").replace("\r\n", "\n").strip()
+        if len(text.encode("utf-8")) > MAX_PEM_BYTES:
+            raise Error("cert_file_too_large")
+        pattern = (
+            r"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----"
+        )
+        parts = re.findall(pattern, text)
+        if re.sub(pattern, "", text).strip() or (required and not parts):
+            raise Error("cert_expected_certificate")
+        return [part.strip() + "\n" for part in parts]
+
+    certificates = blocks(cert_text, True)
+    chain = list(dict.fromkeys(certificates[1:] + blocks(chain_text, False)))
+    return certificates[0], "".join(part for part in chain if part != certificates[0])
+
+
+def certificate_contents(sys, label):
+    target = CONF / "certificates" / name(label)
+    cert = sys.read(target / "cert.pem")
+    chain = sys.read(target / "chain.pem")
+    # Older releases stored intermediates only in fullchain.pem.
+    if not chain and sys.exists(target / "fullchain.pem"):
+        _, chain = normalize_certificates(sys.read(target / "fullchain.pem"))
+    return cert, sys.read(target / "key.pem"), chain
+
+
+def certificate_users(sys, label):
+    return [
+        site
+        for site in sys.data()["sites"].values()
+        if site.get("ssl") == "custom" and site.get("certificate") == label
+    ]
+
+
+def validate_certificate(sys, cert_text, key_text, chain_text="", label=None):
+    cert_text, chain_text = normalize_certificates(cert_text, chain_text)
+    key_text = key_text.lstrip("\ufeff").replace("\r\n", "\n").strip() + "\n"
+    if len(key_text.encode("utf-8")) > MAX_PEM_BYTES:
+        raise Error("cert_file_too_large")
+    if "ENCRYPTED" in key_text:
+        raise Error("cert_encrypted_key")
+    if not re.fullmatch(
+        r"-----BEGIN (PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY)-----[A-Za-z0-9+/=\s]+-----END \1-----\s*",
+        key_text,
+    ):
+        raise Error("cert_expected_private_key")
+    if sys.dry:
+        sys.note("  [PREVIEW] certificate checks require a real OpenSSL validation")
+        return {
+            "subject": "PREVIEW",
+            "expires": "PREVIEW",
+            "days_left": None,
+            "domains": [],
+        }
+    with tempfile.TemporaryDirectory(prefix="mos-cert-") as tmp:
+        p = Path(tmp)
+        for filename, text in [
+            ("cert.pem", cert_text),
+            ("key.pem", key_text),
+            ("chain.pem", chain_text),
+        ]:
+            sys.write(p / filename, text)
+        sys.run(
+            [
+                "openssl",
+                "pkey",
+                "-in",
+                p / "key.pem",
+                "-passin",
+                "pass:",
+                "-check",
+                "-noout",
+            ]
+        )
+        cert_pub = sys.run(
+            ["openssl", "x509", "-in", p / "cert.pem", "-pubkey", "-noout"]
+        )
+        key_pub = sys.run(
+            ["openssl", "pkey", "-in", p / "key.pem", "-passin", "pass:", "-pubout"]
+        )
+        if cert_pub != key_pub:
+            raise Error("error_certificate_and_private_key_do_not_match")
+        sys.run(["openssl", "x509", "-in", p / "cert.pem", "-checkend", "0", "-noout"])
+        chain = p / "chain.pem" if chain_text else None
+        verify_certificate(sys, p / "cert.pem", chain=chain)
+        for site in certificate_users(sys, label):
+            for host in [site["domain"]] + site.get("aliases", []):
+                verify_certificate(sys, p / "cert.pem", host, chain)
+        return certificate_info(sys, p / "cert.pem")
+
+
 def import_certificate(sys, label, cert_text, key_text, chain_text=""):
     label = name(label)
-    # Never log/persist an invalid private key. Verification uses private temp files.
-    if sys.dry:
-        print("  [PREVIEW] validate certificate, key, chain and permissions")
-        metadata = {"subject": "PREVIEW", "expires": "PREVIEW"}
-    else:
-        with tempfile.TemporaryDirectory(prefix="mos-cert-") as tmp:
-            p = Path(tmp)
-            for file, text in [
-                ("cert.pem", cert_text),
-                ("key.pem", key_text),
-                ("chain.pem", chain_text),
-            ]:
-                sys.write(p / file, text)
-            sys.run(
-                [
-                    "openssl",
-                    "pkey",
-                    "-in",
-                    p / "key.pem",
-                    "-passin",
-                    "pass:",
-                    "-check",
-                    "-noout",
-                ]
-            )
-            cert_pub = sys.run(
-                ["openssl", "x509", "-in", p / "cert.pem", "-pubkey", "-noout"]
-            )
-            key_pub = sys.run(
-                ["openssl", "pkey", "-in", p / "key.pem", "-passin", "pass:", "-pubout"]
-            )
-            if cert_pub != key_pub:
-                raise Error("error_certificate_and_private_key_do_not_match")
-            sys.run(
-                ["openssl", "x509", "-in", p / "cert.pem", "-checkend", "0", "-noout"]
-            )
-            for site in sys.data()["sites"].values():
-                if site.get("ssl") == "custom" and site.get("certificate") == label:
-                    for host in [site["domain"]] + site.get("aliases", []):
-                        verify_certificate(
-                            sys,
-                            p / "cert.pem",
-                            host,
-                            p / "chain.pem" if chain_text.strip() else None,
-                        )
-            verify_certificate(
-                sys,
-                p / "cert.pem",
-                chain=p / "chain.pem" if chain_text.strip() else None,
-            )
-            metadata = certificate_info(sys, p / "cert.pem")
+    cert_text, chain_text = normalize_certificates(cert_text, chain_text)
+    key_text = key_text.lstrip("\ufeff").replace("\r\n", "\n").strip() + "\n"
+    metadata = validate_certificate(sys, cert_text, key_text, chain_text, label)
     target = CONF / "certificates" / label
     sys.mkdir(target, 0o700)
-    with sys.transaction(
-        [target / x for x in ("cert.pem", "key.pem", "fullchain.pem")]
-    ):
-        sys.write(target / "cert.pem", cert_text, 0o644)
-        sys.write(target / "key.pem", key_text)
-        sys.write(
-            target / "fullchain.pem",
-            cert_text.rstrip() + "\n" + chain_text.strip() + "\n",
-            0o644,
-        )
-        if not sys.dry and installed(sys, "apache2"):
-            sys.run(["apache2ctl", "configtest"], mutate=True)
-    data = sys.data()
-    data["certificates"][label] = metadata
-    sys.save(data)
-    if installed(sys, "apache2"):
-        sys.run(["systemctl", "reload", "apache2"], mutate=True)
+    apache = installed(sys, "apache2")
+    files = [target / x for x in ("cert.pem", "key.pem", "chain.pem", "fullchain.pem")]
+    try:
+        # Keep certificate files and inventory consistent even if Apache reload fails.
+        with sys.transaction(files + [STATE / "state.json"]):
+            sys.write(target / "cert.pem", cert_text, 0o644)
+            sys.write(target / "key.pem", key_text)
+            sys.write(target / "chain.pem", chain_text, 0o644)
+            sys.write(target / "fullchain.pem", cert_text + chain_text, 0o644)
+            if apache:
+                sys.run(["apache2ctl", "configtest"], mutate=True)
+            data = sys.data()
+            data["certificates"][label] = metadata
+            sys.save(data)
+            if apache:
+                sys.run(["systemctl", "reload", "apache2"], mutate=True)
+    except BaseException:
+        if apache:
+            # The file transaction has already restored the previous bundle.
+            try:
+                sys.run(["apache2ctl", "configtest"], mutate=True)
+                sys.run(["systemctl", "reload", "apache2"], mutate=True)
+            except (Error, OSError):
+                sys.audit("Certificate rollback: check Apache service manually")
+        raise
     sys.audit("Custom certificate imported: " + label)
+    return metadata
 
 
 def certificate_info(sys, path):
-    output = sys.run(["openssl", "x509", "-in", path, "-noout", "-subject", "-enddate"])
-    expires = next(
-        (x.split("=", 1)[1] for x in output.splitlines() if x.startswith("notAfter=")),
-        "",
+    output = sys.run(
+        [
+            "openssl",
+            "x509",
+            "-in",
+            path,
+            "-noout",
+            "-subject",
+            "-issuer",
+            "-startdate",
+            "-enddate",
+            "-fingerprint",
+            "-sha256",
+            "-ext",
+            "subjectAltName",
+        ]
     )
+    values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    expires = values.get("notAfter", "")
     try:
         date = dt.datetime.strptime(expires, "%b %d %H:%M:%S %Y %Z").replace(
             tzinfo=dt.timezone.utc
@@ -460,9 +549,15 @@ def certificate_info(sys, path):
     except ValueError:
         days = None
     return {
-        "subject": output.splitlines()[0] if output else "",
+        "subject": values.get("subject", ""),
+        "issuer": values.get("issuer", ""),
+        "valid_from": values.get("notBefore", ""),
         "expires": expires,
         "days_left": days,
+        "domains": re.findall(r"DNS:([^,\s]+)", output),
+        "fingerprint": next(
+            (value for key, value in values.items() if "fingerprint" in key.lower()), ""
+        ),
     }
 
 
