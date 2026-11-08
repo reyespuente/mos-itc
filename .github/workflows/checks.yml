@@ -4,13 +4,15 @@ permissions:
   contents: read
 jobs:
   offline-tests:
-    runs-on: ubuntu-latest
+    # Keep a runner with published builds for the oldest supported Python.
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         python: ['3.9', '3.12', '3.14']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
