@@ -1,3 +1,34 @@
+# Validation record — 0.3.0-beta.1
+
+Local suite: **75 passed, no skips**, including input/permission boundaries,
+metadata rollback, password redaction, APT approval and network-rate calculations.
+Python compilation, Python 3.9 syntax, installer syntax and translation parity passed.
+
+On the authorized Ubuntu 26.04.1 KVM guest (192.168.122.39):
+
+* MariaDB and PostgreSQL 18 were exercised against real local services. Temporary
+  databases and users were removed after verification. PostgreSQL was installed
+  only in this disposable guest, not on the Linux Mint workstation.
+* Both engines passed database/user creation, read-only SELECT and rejected writes,
+  allowed row writes and rejected schema creation by writer accounts.
+* Administrators created tables but could not create unrelated databases. New
+  PostgreSQL owner-created tables/sequences inherited the configured grants.
+* Cross-database access was denied, including a MariaDB underscore lookalike.
+  Sharing one user across databases and revoking one grant preserved the others.
+* Permission downgrade took effect on a fresh connection. Password rotation
+  rejected the old password and accepted the new one. SQL exports were nonempty
+  and mode 0600. User/database deletion and cleanup passed.
+* All 75 automated tests passed on the VM's Python 3.14, with no skips.
+* Installer upgrade to 0.3.0-beta.1 created a configuration restore point and
+  preserved the existing two HTTPS sites. Native menus and live dashboard opened.
+* Real CPU/memory/swap/uptime/process/service data were checked. Palette behavior
+  was verified in xterm-256color; a native Konsole session was not available.
+
+Limits: the database manager targets the default local MariaDB service and
+PostgreSQL cluster. Existing external databases are inventory-only. PostgreSQL
+automatic object grants target public; external schemas, role changes and custom
+clusters require separate review. The real server was not changed by these tests.
+
 # Validation record — 0.2.1-beta.1
 
 Checked on November 8, 2026. Local offline suite: **63 passed, no skips**,

@@ -15,7 +15,7 @@ import sys as python_sys
 import tempfile
 import textwrap
 
-from . import core, web, ops, recovery, users
+from . import core, web, ops, recovery, users, databases, postgresql
 from .core import Error, STATE, CONF, SITES
 from .i18n import Translator
 from .terminal import Terminal, Cancelled, WORDMARK, INSTITUTE, DISPLAY_AUTHOR, clean
@@ -446,7 +446,7 @@ class UI:
                 "configure_website_ssl",
                 "git_deployment",
                 "website_ssh_sftp_access",
-                "ui_create_database",
+                "db_manage",
                 "delete_website",
                 "back",
             ]
@@ -462,7 +462,10 @@ class UI:
                 lambda: self.database_site(site),
                 lambda: self.remove_site(site),
             ]
-            self.perform(actions[choice])
+            if choice == 5:
+                actions[choice]()
+            else:
+                self.perform(actions[choice])
 
     def edit_site(self, site):
         choice = self.menu(
@@ -507,17 +510,240 @@ class UI:
 
     def database_site(self, site):
         if site.get("database"):
-            self.show(
-                self.t("ui_database_exists", database=site["database"]), site["domain"]
+            return self.database_detail(databases, site["database"])
+
+        def create():
+            if self.confirm("create_a_mariadb_database"):
+                web.create_database(self.sys, site)
+
+        self.perform(create)
+
+    def database_manager(self):
+        engines = [("MariaDB", databases), ("PostgreSQL", postgresql)]
+        while True:
+            choice = self.menu("db_manage", [label for label, _ in engines] + ["back"])
+            if choice in (None, 2):
+                return
+            label, engine = engines[choice]
+            if self.perform(lambda: self.ensure_database_engine(engine)):
+                self.database_inventory(engine, label)
+
+    def ensure_database_engine(self, engine):
+        package = "postgresql" if engine is postgresql else "mariadb-server"
+        if core.installed(self.sys, package):
+            return True
+        if not self.confirm(self.t("db_install_engine", package=package)):
+            return False
+        core.refresh(self.sys)
+        args, plan = core.apt_plan(self.sys, [package])
+        if not self.confirm("apply_package_installation", details=plan):
+            return False
+        core.apply_packages(self.sys, args)
+        return True
+
+    def database_inventory(self, engine, label):
+        while True:
+            rows = self.perform(lambda: engine.inventory(self.sys))
+            if rows is None:
+                return
+            names = [r["database"] for r in rows]
+            options = (
+                ["db_create"]
+                + [
+                    r["database"]
+                    + "  ·  "
+                    + (
+                        r["site"]
+                        or self.t("db_managed" if r["managed"] else "db_external")
+                    )
+                    + f'  ·  {r["bytes"]/1048576:.1f} MiB'
+                    for r in rows
+                ]
+                + ["back"]
             )
-            return
-        if self.confirm("create_a_mariadb_database"):
-            self.notify(
-                self.t(
-                    "database_credentials_saved",
-                    path=web.create_database(self.sys, site),
+            choice = self.menu(label, options)
+            if choice is None or choice == len(options) - 1:
+                return
+            if choice == 0:
+                self.perform(lambda: self.create_database(engine))
+            elif not rows[choice - 1]["managed"]:
+                self.show(self.t("db_external_hint"), "db_manage")
+            else:
+                self.database_detail(engine, names[choice - 1])
+
+    def create_database(self, engine):
+        database = core.name(self.ask("db_name"))
+        if self.confirm(self.t("db_confirm_create", database=database)):
+            engine.create(self.sys, database)
+
+    def database_detail(self, engine, database):
+        while database in engine.managed(self.sys):
+            choice = self.menu(
+                database, ["db_tables", "db_users", "db_export", "db_delete", "back"]
+            )
+            if choice in (None, 4):
+                return
+            if choice == 0:
+                self.perform(
+                    lambda: self.show(
+                        self.t("db_tables_hint")
+                        + "\n\n"
+                        + (engine.tables(self.sys, database) or self.t("db_no_tables")),
+                        database,
+                    )
                 )
+            elif choice == 1:
+                self.database_users(engine, database)
+            elif choice == 2:
+                self.perform(
+                    lambda: self.show(
+                        self.t("db_dump_saved", path=engine.dump(self.sys, database))
+                    )
+                )
+            else:
+
+                def remove():
+                    if self.confirm(
+                        self.t("db_confirm_delete", database=database), database
+                    ):
+                        self.show(
+                            self.t(
+                                "db_dump_saved", path=engine.remove(self.sys, database)
+                            )
+                        )
+
+                self.perform(remove)
+
+    def database_role(self):
+        roles = list(databases.ROLES)
+        choice = self.menu(
+            "db_permissions",
+            ["db_role_" + role for role in roles] + ["back"],
+            details={
+                "db_role_read": self.t("db_read_hint"),
+                "db_role_write": self.t("db_write_hint"),
+                "db_role_admin": self.t("db_admin_hint"),
+            },
+        )
+        if choice is None or choice == len(roles):
+            raise Cancelled
+        return roles[choice]
+
+    def database_users(self, engine, database):
+        while True:
+            accounts = engine.accounts(self.sys, database)
+            rows = (
+                ["db_user_create", "db_user_existing"]
+                + [
+                    a["username"]
+                    + "  ·  "
+                    + self.t("db_role_" + a["role"])
+                    + ("  ·  " + self.t("db_primary") if a["primary"] else "")
+                    for a in accounts
+                ]
+                + ["back"]
             )
+            choice = self.menu(self.t("db_users_title", database=database), rows)
+            if choice is None or choice == len(rows) - 1:
+                return
+            if choice == 0:
+
+                def create():
+                    username = core.name(self.ask("db_username"))
+                    role = self.database_role()
+                    if self.confirm(
+                        self.t(
+                            "db_confirm_user",
+                            username=username,
+                            database=database,
+                            role=self.t("db_role_" + role),
+                        )
+                    ):
+                        engine.create_user(self.sys, database, username, role)
+                        self.database_access(engine, database, username)
+
+                self.perform(create)
+            elif choice == 1:
+
+                def existing():
+                    key = (
+                        "postgresql_accounts"
+                        if engine is postgresql
+                        else "database_accounts"
+                    )
+                    candidates = sorted(
+                        set(self.sys.data().get(key, {}))
+                        - {a["username"] for a in accounts}
+                    )
+                    if not candidates:
+                        return self.show(self.t("db_no_other_users"))
+                    selected = self.menu("db_user_existing", candidates + ["back"])
+                    if selected is None or selected == len(candidates):
+                        return
+                    username = candidates[selected]
+                    role = self.database_role()
+                    if self.confirm(
+                        self.t(
+                            "db_confirm_user",
+                            username=username,
+                            database=database,
+                            role=self.t("db_role_" + role),
+                        )
+                    ):
+                        engine.grant(self.sys, database, username, role)
+
+                self.perform(existing)
+            else:
+                self.database_user_actions(engine, database, accounts[choice - 2])
+
+    def database_access(self, engine, database, username):
+        if self.confirm("db_reveal_warning"):
+            # Deliberately bypass notify/activity: credentials stay out of logs.
+            self.show(
+                json.dumps(engine.credentials(self.sys, database, username), indent=2),
+                "db_access",
+            )
+
+    def database_user_actions(self, engine, database, account):
+        username = account["username"]
+        rows = ["db_access", "db_password"]
+        if not account["primary"]:
+            rows += ["db_permissions", "db_revoke", "db_user_delete"]
+        choice = self.menu(username + "@" + database, rows + ["back"])
+        if choice is None or choice == len(rows):
+            return
+
+        def action():
+            if choice == 0:
+                self.database_access(engine, database, username)
+            elif choice == 1:
+                if self.confirm(self.t("db_password_warning", username=username)):
+                    engine.rotate_password(self.sys, database, username)
+                    self.database_access(engine, database, username)
+            elif choice == 2:
+                role = self.database_role()
+                if self.confirm(
+                    self.t(
+                        "db_confirm_user",
+                        username=username,
+                        database=database,
+                        role=self.t("db_role_" + role),
+                    )
+                ):
+                    engine.grant(self.sys, database, username, role)
+            elif choice == 3:
+                if self.confirm(
+                    self.t("db_confirm_revoke", username=username, database=database),
+                    username,
+                ):
+                    engine.revoke(self.sys, database, username)
+            elif choice == 4:
+                if self.confirm(
+                    self.t("db_confirm_user_delete", username=username), username
+                ):
+                    engine.delete_user(self.sys, database, username)
+
+        self.perform(action)
 
     def deploy_site(self, site):
         repo = self.ask("public_git_https_url")
@@ -962,7 +1188,7 @@ class UI:
         return self.section(
             "view_performance",
             [
-                ("live_metrics", lambda: self.performance_action(0)),
+                ("dashboard", self.live_dashboard),
                 ("hourly_timeline_7_days", lambda: self.performance_action(1)),
                 ("active_services", lambda: self.performance_action(2)),
                 ("firewall_rules", lambda: self.performance_action(3)),
@@ -971,10 +1197,35 @@ class UI:
             ],
         )
 
+    def live_dashboard(self):
+        # Read-only monitoring must not hold the global mutation lock.
+        from .terminal import dashboard_lines
+
+        def services():
+            return ops.dashboard_services(core.System(dry=self.sys.dry))
+
+        if self.terminal:
+            self.terminal.monitor(ops.metrics, services, ops.memory_processes)
+        else:
+            data = ops.metrics()
+            self.show(
+                "\n".join(
+                    dashboard_lines(
+                        data,
+                        None,
+                        [data["cpu"]],
+                        services(),
+                        ops.memory_processes(),
+                        self.t,
+                    )
+                ),
+                "dashboard",
+            )
+
     def performance_action(self, choice):
         if choice == 0:
             if self.terminal:
-                self.terminal.monitor(ops.metrics)
+                self.live_dashboard()
             else:
                 self.show(json.dumps(ops.metrics(), indent=2))
         elif choice == 1:
@@ -1126,7 +1377,7 @@ class UI:
             if choice is None or choice == len(entries):
                 return
             action = entries[choice][1]
-            if action in (self.ssh, self.security, self.ssl):
+            if action in (self.ssh, self.security, self.ssl, self.live_dashboard):
                 action()
             else:
                 self.perform(action, allow_pending=title == "ssh_configuration")
@@ -1325,6 +1576,7 @@ class UI:
         entries = [
             ("ui_overview", self.overview),
             ("websites", self.websites),
+            ("db_manage", self.database_manager),
             ("ui_software", self.software),
             ("admin_users", self.admin_users),
             ("ui_security_access", self.security_center),
@@ -1346,6 +1598,7 @@ class UI:
                     self.security_center,
                     self.settings,
                     self.websites,
+                    self.database_manager,
                     self.admin_users,
                     self.backups,
                     self.performance,

@@ -495,7 +495,70 @@ def metrics():
         "network": net,
         "load": os.getloadavg(),
         "host": socket.gethostname(),
+        "cores": os.cpu_count() or 1,
+        "uptime": float(Path("/proc/uptime").read_text().split()[0]),
+        "swap_total": mem.get("SwapTotal", 0),
+        "swap_used": mem.get("SwapTotal", 0) - mem.get("SwapFree", 0),
+        "ram_available": mem["MemAvailable"],
+        "processes": sum(p.name.isdigit() for p in Path("/proc").iterdir()),
+        "inodes_total": os.statvfs("/").f_files,
+        "inodes_free": os.statvfs("/").f_ffree,
+        "monotonic": time.monotonic(),
     }
+
+
+def dashboard_services(system):
+    output = system.run(
+        [
+            "systemctl",
+            "show",
+            "--no-pager",
+            "--property=Id,LoadState,ActiveState,SubState",
+            "apache2.service",
+            "nginx.service",
+            "mariadb.service",
+            "postgresql.service",
+            "postgresql@*.service",
+            "php*-fpm.service",
+            "ssh.service",
+            "fail2ban.service",
+            "clamav-freshclam.service",
+            "mos-metrics.timer",
+        ],
+        check=False,
+    )
+    services = []
+    for block in output.strip().split("\n\n"):
+        fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if fields.get("LoadState") == "loaded":
+            services.append(
+                {
+                    "name": fields["Id"],
+                    "state": fields.get("ActiveState", "unknown"),
+                    "detail": fields.get("SubState", ""),
+                }
+            )
+    return services
+
+
+def memory_processes(limit=5):
+    processes = []
+    pagesize = os.sysconf("SC_PAGE_SIZE")
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            rss = int((entry / "statm").read_text().split()[1]) * pagesize
+            processes.append(
+                {
+                    "pid": int(entry.name),
+                    "name": (entry / "comm").read_text().strip(),
+                    "rss": rss,
+                }
+            )
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(processes, key=lambda p: p["rss"], reverse=True)[:limit]
 
 
 def record_metrics(sys):

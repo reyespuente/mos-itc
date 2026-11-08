@@ -53,3 +53,19 @@ delete arbitrary system directories or perform `apt autoremove`.
 Installer recovery points contain private system configuration. They are root-only,
 are retained on app removal, and are extracted only into a new directory for review.
 They do not capture website data, live database state, or an entire disk.
+
+## Database accounts
+
+The database manager changes only MOS-registered databases and accounts. Existing
+external databases are inventory-only. Additional credentials are root-only;
+website primary MariaDB credentials retain their site-user ownership. SQL password
+statements use stdin and sanitized errors, never process arguments or activity logs.
+Credentials are explicitly revealed on screen and can still be captured by terminal
+recording. SSH and database users are separate.
+
+MariaDB grants escape database-name underscores to avoid wildcard access. Older
+MOS-created primary account grants are not silently migrated: review existing
+grants when upgrading. PostgreSQL administration is database ownership through
+a group role, without superuser or server role-creation rights; automatic grants
+cover public-schema owner-created objects. PostgreSQL uses the default local cluster
+and existing authentication rules. No remote database exposure is enabled.

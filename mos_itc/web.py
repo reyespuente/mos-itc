@@ -317,14 +317,23 @@ def create_site(sys, host, version=None, www=False, laravel=False, timezone="UTC
 
 
 def create_database(sys, site):
-    db = site["user"]
+    from . import databases
+
+    if sys.data()["sites"].get(site["domain"], {}).get("database"):
+        raise Error("db_exists")
+    db = name(site["user"])
+    if (
+        db in {row["database"] for row in databases.inventory(sys)}
+        or databases.sql(sys, f"SELECT User FROM mysql.user WHERE User='{db}';").strip()
+    ):
+        raise Error("db_exists")
     password = secrets.token_urlsafe(32)
     sql = (
         f"CREATE DATABASE `{db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
         f"CREATE USER '{db}'@'localhost' IDENTIFIED BY '{password}';\n"
-        f"GRANT ALL PRIVILEGES ON `{db}`.* TO '{db}'@'localhost';\n"
+        f"GRANT ALL PRIVILEGES ON {databases.privilege_target(db)} TO '{db}'@'localhost';\n"
     )
-    sys.run(["mariadb", "--protocol=socket"], input=sql, mutate=True)
+    databases.sql(sys, sql, True)
     secret = SITES / site["domain"] / ".database.json"
     sys.write(
         secret,
@@ -585,15 +594,12 @@ def delete_site(sys, site, erase=False):
         home = SITES / host
         if home.is_symlink():
             raise Error("error_refusing_to_erase_a_symlink")
+        if site.get("database"):
+            from . import databases
+
+            databases.remove(sys, site["database"])
         if not sys.dry:
             shutil.rmtree(home)
-        if site.get("database"):
-            db = name(site["database"])
-            sys.run(
-                ["mariadb", "--protocol=socket"],
-                input=f"DROP DATABASE `{db}`; DROP USER IF EXISTS '{db}'@'localhost';",
-                mutate=True,
-            )
         sys.run(["userdel", site["user"]], mutate=True)
     data = sys.data()
     del data["sites"][host]

@@ -103,6 +103,7 @@ def parser():
     confirm = s.add_parser("confirm")
     confirm.add_argument("token")
     sub.add_parser("security")
+    sub.add_parser("databases", help="Manage MariaDB and PostgreSQL databases")
     sub.add_parser("users", help="Manage local SSH administrators")
     restore_point = sub.add_parser(
         "restore-point", help="Installer configuration recovery"
@@ -189,6 +190,7 @@ def main(argv=None):
                 "speedtest",
                 "uninstall",
                 "users",
+                "databases",
             )
             or (args.command == "ssh" and args.action == "manage")
             or (args.command == "website" and args.action == "manage")
@@ -216,6 +218,8 @@ def main(argv=None):
                 ui.session(lambda: ui.perform(ui.configure))
             elif args.command == "ssl":
                 ui.session(ui.ssl)
+            elif args.command == "databases":
+                ui.session(ui.database_manager)
             elif args.command == "users":
                 ui.session(ui.admin_users)
             elif args.command == "security":

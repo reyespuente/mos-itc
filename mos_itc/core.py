@@ -12,7 +12,7 @@ import tempfile
 import time
 from urllib.parse import urlparse
 
-VERSION = "0.2.1-beta.1"
+VERSION = "0.3.0-beta.1"
 AUTHOR = "Reyes Guadalupe Puente Balcazar"
 STATE = Path("/var/lib/mos-itc")
 CONF = Path("/etc/mos-itc")

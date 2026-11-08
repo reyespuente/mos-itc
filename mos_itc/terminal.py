@@ -68,14 +68,21 @@ class Terminal:
                 "#88877b",
             ]
             indices = [235, 255, 245, 24, 28, 15, 28, 160, 220, 245]
-            if curses.can_change_color() and curses.COLORS >= 256:
-                indices = list(range(16, 26))
-                for index, value in zip(indices, colors):
-                    self.original_colors[index] = curses.color_content(index)
-                    rgb = tuple(round(c * 1000 / 255) for c in bytes.fromhex(value[1:]))
-                    curses.init_color(index, *rgb)
-            elif curses.COLORS < 256:
-                indices = [0, 7, 7, 4, 2, 7, 2, 1, 3, 7]
+            # Use standard palette slots: redefining extended slots renders
+            # inconsistently across terminal emulators, including Konsole.
+            if curses.COLORS < 256:
+                indices = [
+                    curses.COLOR_BLACK,
+                    curses.COLOR_WHITE,
+                    curses.COLOR_WHITE,
+                    curses.COLOR_BLUE,
+                    curses.COLOR_GREEN,
+                    curses.COLOR_WHITE,
+                    curses.COLOR_GREEN,
+                    curses.COLOR_RED,
+                    curses.COLOR_YELLOW,
+                    curses.COLOR_WHITE,
+                ]
             for pair, foreground, background in [
                 (1, indices[1], indices[0]),
                 (2, indices[2], indices[0]),
@@ -393,35 +400,122 @@ class Terminal:
             self.put(i, 3, line, style=self.style(2))
         self.win.refresh()
 
-    def monitor(self, sample):
+    def monitor(self, sample, services=None, processes=None):
         self.win.timeout(750)
+        history = []
+        previous = None
+        health = []
+        last_services = 0
+        scroll = 0
         try:
             while True:
                 data = sample()
-                self.frame("live_metrics", "ui_menu_keys")
-                rows = [
-                    ("CPU", data["cpu"]),
-                    ("RAM", 100 * data["ram_used"] / data["ram_total"]),
-                    ("DISK", 100 * data["disk_used"] / data["disk_total"]),
-                ]
-                for y, (label, percent) in zip((9, 12, 15), rows):
-                    width = max(5, min(40, self.win.getmaxyx()[1] - 25))
-                    fill = round(width * max(0, min(100, percent)) / 100)
-                    self.put(
-                        y,
-                        3,
-                        f'{label:<6} {"█"*fill}{"░"*(width-fill)}  {percent:5.1f}%',
-                        style=self.style(5, True),
-                    )
-                self.put(18, 3, data["time"], style=self.style(2))
+                history = (history + [data["cpu"]])[-60:]
+                if services and time.monotonic() - last_services >= 10:
+                    health = services()
+                    last_services = time.monotonic()
+                self.frame("dashboard", "dashboard_keys")
+                height, width = self.win.getmaxyx()
+                lines = dashboard_lines(
+                    data,
+                    previous,
+                    history,
+                    health,
+                    processes() if processes else [],
+                    self.t,
+                    width - 8,
+                )
+                visible = max(1, height - 12)
+                scroll = max(0, min(scroll, len(lines) - visible))
+                for y, text in enumerate(lines[scroll : scroll + visible], 8):
+                    self.put(y, 3, text, style=self.style(1))
                 self.put(
-                    self.win.getmaxyx()[0] - 4,
-                    3,
-                    "  " + self.t("back") + "  ",
-                    style=self.style(3, True),
+                    height - 4, 3, self.t("dashboard_refresh"), style=self.style(2)
                 )
                 self.win.refresh()
-                if self.win.getch() in (27, ord("q"), 10, 13, curses.KEY_ENTER):
+                key = self.win.getch()
+                if key in (27, ord("q"), 10, 13, curses.KEY_ENTER):
                     return
+                if key in (curses.KEY_DOWN, curses.KEY_NPAGE):
+                    scroll += visible if key == curses.KEY_NPAGE else 1
+                elif key in (curses.KEY_UP, curses.KEY_PPAGE):
+                    scroll -= visible if key == curses.KEY_PPAGE else 1
+                previous = data
         finally:
             self.win.timeout(-1)
+
+
+def dashboard_lines(data, previous, history, services, processes, translate, width=90):
+    def size(value):
+        return (
+            f"{value/1073741824:.2f} GiB"
+            if value >= 1073741824
+            else f"{value/1048576:.1f} MiB"
+        )
+
+    def gauge(label, percent, detail=""):
+        columns = max(6, min(28, width - 35))
+        fill = round(columns * max(0, min(100, percent)) / 100)
+        return f"{label:<8} [{'#'*fill}{'-'*(columns-fill)}] {percent:5.1f}%  {detail}"
+
+    uptime = int(data.get("uptime", 0))
+    lines = [
+        f'{data["host"]}  ·  {data["time"][:19]} UTC',
+        translate(
+            "dashboard_uptime",
+            days=uptime // 86400,
+            hours=uptime // 3600 % 24,
+            minutes=uptime // 60 % 60,
+            cores=data.get("cores", 1),
+            processes=data.get("processes", 0),
+        ),
+        "",
+        gauge("CPU", data["cpu"]),
+        gauge(
+            "RAM",
+            100 * data["ram_used"] / max(1, data["ram_total"]),
+            size(data["ram_used"]) + " / " + size(data["ram_total"]),
+        ),
+        gauge(
+            translate("dashboard_disk"),
+            100 * data["disk_used"] / max(1, data["disk_total"]),
+            size(data["disk_used"]) + " / " + size(data["disk_total"]),
+        ),
+    ]
+    swap = data.get("swap_total", 0)
+    lines.append(
+        gauge("Swap", 100 * data.get("swap_used", 0) / max(1, swap), size(swap))
+        if swap
+        else translate("dashboard_no_swap")
+    )
+    if data.get("inodes_total"):
+        lines.append(
+            gauge("Inodes", 100 * (1 - data["inodes_free"] / data["inodes_total"]))
+        )
+    lines += [
+        translate("dashboard_load")
+        + ": "
+        + " / ".join(f"{n:.2f}" for n in data["load"]),
+        translate("dashboard_cpu_history")
+        + ": "
+        + "".join(" .:-=+*#%@"[min(9, max(0, int(n * 9 / 100)))] for n in history),
+        "",
+        translate("dashboard_network"),
+    ]
+    elapsed = data.get("monotonic", 0) - (previous or {}).get("monotonic", 0)
+    for iface, counters in data["network"].items():
+        old = (previous or {}).get("network", {}).get(iface)
+        rates = "—"
+        if old and elapsed > 0:
+            rates = f'↓ {max(0,counters["received"]-old["received"])/elapsed/1024:.1f} KiB/s  ↑ {max(0,counters["sent"]-old["sent"])/elapsed/1024:.1f} KiB/s'
+        lines.append(
+            f'{iface:<12} {rates}  RX {size(counters["received"])} / TX {size(counters["sent"])}'
+        )
+    lines += ["", translate("dashboard_services")]
+    lines += [
+        f'{s["name"]:<26} {translate("dashboard_state_"+s["state"])} ({s["detail"]})'
+        for s in services
+    ] or ["—"]
+    lines += ["", translate("dashboard_processes")]
+    lines += [f'{p["pid"]:>7}  {p["name"]:<22} {size(p["rss"])}' for p in processes]
+    return lines

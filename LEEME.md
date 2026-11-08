@@ -3,7 +3,7 @@
 Herramienta de terminal creada por **Reyes Guadalupe Puente Balcazar** como una
 iniciativa en el Instituto Tecnológico de Celaya. Licencia MIT, de libre uso.
 
-Esta es la **versión 0.2.1-beta.1**. Prueba la instalación completa en una VM
+Esta es la **versión 0.3.0-beta.1**. Prueba la instalación completa en una VM
 desechable antes de utilizarla en un VPS con datos reales.
 
 ## Abrir los menús en Linux Mint sin instalar servicios
@@ -112,3 +112,16 @@ En **Administradores SSH** puedes crear usuarios con carpeta personal, Bash y
 sudo completo que requiere su contraseña. También puedes cambiar contraseñas
 y agregar claves públicas. Si SSH no permite contraseñas, se exige una clave.
 La app no cambia esa política ni deshabilita root. Comando: `sudo mos-itc users`.
+
+## Bases de datos y dashboard
+
+**Bases de datos → MariaDB / PostgreSQL → base → Usuarios y permisos** permite
+ver accesos, crear varios usuarios, asignar lectura, escritura o administración,
+compartir un usuario entre bases y cambiar sus contraseñas. Las contraseñas se
+muestran solo tras confirmación; los usuarios de base son distintos a los de SSH.
+Las bases externas se muestran sin adoptar sus permisos. Para los sitios actuales:
+**Sitios web → dominio → Bases de datos → Usuarios y permisos → usuario principal**.
+
+**Ver rendimiento → Dashboard del servidor** muestra carga, CPU, RAM, swap, disco,
+inodos, tráfico de red por segundo, servicios y procesos con más memoria. Usa las
+flechas para desplazar el contenido.
