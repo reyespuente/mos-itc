@@ -7,12 +7,13 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
 import time
 from urllib.parse import urlparse
 
-VERSION = "0.3.0-beta.1"
+VERSION = "0.4.0-beta.1"
 AUTHOR = "Reyes Guadalupe Puente Balcazar"
 STATE = Path("/var/lib/mos-itc")
 CONF = Path("/etc/mos-itc")
@@ -109,11 +110,23 @@ class System:
                     if time.monotonic() - started >= timeout:
                         raise
         except BaseException:
-            process.terminate()
+            if getattr(process, "mos_process_group", False):
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.terminate()
             try:
                 process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if getattr(process, "mos_process_group", False):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
                 process.communicate()
             raise
 
@@ -127,6 +140,7 @@ class System:
         input=None,
         env=None,
         allowed_codes=(0,),
+        process_group=False,
     ):
         args = [str(x) for x in args]
         self.commands.append(args)
@@ -134,7 +148,7 @@ class System:
             self.note("  [PREVIEW] " + " ".join(args))
             return ""
         try:
-            if self.progress:
+            if self.progress or process_group:
                 with subprocess.Popen(
                     args,
                     stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -142,7 +156,9 @@ class System:
                     stderr=subprocess.PIPE,
                     text=True,
                     env=env or SAFE_ENV,
+                    start_new_session=process_group,
                 ) as process:
+                    process.mos_process_group = process_group
                     stdout, stderr = self.communicate(
                         process, " ".join(args), timeout, input
                     )
@@ -360,7 +376,24 @@ def official_uri(uri):
             "old-releases.ubuntu.com",
         }
         or host.endswith(".archive.ubuntu.com")
+        or host.endswith(".deb.debian.org")
     )
+
+
+def approved_source(system, uri):
+    if official_uri(uri):
+        return True
+    if re.fullmatch(r"mirror\+file:///etc/apt/mirrors/[A-Za-z0-9_.-]+", uri):
+        path = Path(uri.removeprefix("mirror+file://"))
+        if path.is_symlink():
+            return False
+        entries = [
+            line.split()[0]
+            for line in system.read(path).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        return bool(entries) and all(official_uri(entry) for entry in entries)
+    return False
 
 
 def repository_check(sys):
@@ -378,12 +411,14 @@ def repository_check(sys):
                 # Debian822 allows folded URI lists.
                 fields = re.sub(r"\n[ \t]+", " ", paragraph)
                 for match in re.finditer(r"^URIs:\s*(.+)$", fields, re.M | re.I):
-                    bad.extend(uri for uri in match[1].split() if not official_uri(uri))
+                    bad.extend(
+                        uri for uri in match[1].split() if not approved_source(sys, uri)
+                    )
         else:
             for line in content.splitlines():
                 if re.match(r"^\s*deb(?:-src)?\s", line):
                     parts = re.sub(r"\[[^]]*\]", "", line).split()
-                    if len(parts) > 1 and not official_uri(parts[1]):
+                    if len(parts) > 1 and not approved_source(sys, parts[1]):
                         bad.append(parts[1])
     if bad and not sys.external:
         raise Error(

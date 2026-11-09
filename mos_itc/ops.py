@@ -38,7 +38,7 @@ def timezone(value):
 
 
 def install_timer(sys, label, calendar, command, description):
-    if not re.fullmatch(r"[a-z-]+", label):
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,50}", label):
         raise Error("error_invalid_timer_name")
     base = Path("/etc/systemd/system") / ("mos-" + label)
     sys.write(
@@ -663,58 +663,13 @@ def configure_backup(sys, repository, password, s3=None):
         sys.write(CONF / "rclone.conf", "# Configure your rclone remote here\n")
 
 
-def backup(sys, action="backup", target=None):
-    config, env = backup_env(sys)
-    if action == "init":
-        return sys.run(["restic", "init"], env=env, mutate=True, timeout=180)
-    if action in ("snapshots", "check"):
-        return sys.run(["restic", action], env=env, mutate=True, timeout=3600)
-    if action == "restore":
-        target = safe_path(target or "/srv/mos-restore")
-        if target == Path("/") or target.exists():
-            raise Error("error_restore_to_a_new_directory_then_inspect_files")
-        return sys.run(
-            ["restic", "restore", "latest", "--target", target],
-            env=env,
-            mutate=True,
-            timeout=7200,
-        )
-    if action != "backup":
-        raise Error("error_invalid_backup_action")
-    stage = STATE / "database-dumps"
-    sys.mkdir(stage, 0o700)
-    if installed(sys, "mariadb-server"):
-        sys.run_to_file(
-            [
-                "mariadb-dump",
-                "--all-databases",
-                "--single-transaction",
-                "--routines",
-                "--events",
-                "--triggers",
-            ],
-            stage / "mariadb.sql",
-        )
-    if installed(sys, "postgresql"):
-        sys.run_to_file(
-            ["runuser", "-u", "postgres", "--", "pg_dumpall"], stage / "postgresql.sql"
-        )
-    args = [
-        "restic",
-        "backup",
-        "/etc",
-        str(STATE),
-        "--exclude",
-        str(STATE / "restic-cache"),
-        "--tag",
-        "mos-itc",
-    ]
-    # Include managed website directories and root's keys/config; not live database files.
-    if SITES.exists() or sys.dry:
-        args += [str(SITES)]
-    result = sys.run(args, env=env, mutate=True, timeout=7200)
-    sys.audit("Encrypted remote backup completed")
-    return result
+def backup(sys, action="backup", target=None, repository=None, snapshot="latest"):
+    from . import backups
+
+    profile = backups.load(sys, repository)
+    if action == "snapshots":
+        return json.dumps(backups.snapshots(sys, profile), indent=2)
+    return backups.operate(sys, profile["id"], action, target, snapshot)
 
 
 def deploy(sys, site, repository, ref="main"):

@@ -69,3 +69,22 @@ grants when upgrading. PostgreSQL administration is database ownership through
 a group role, without superuser or server role-creation rights; automatic grants
 cover public-schema owner-created objects. PostgreSQL uses the default local cluster
 and existing authentication rules. No remote database exposure is enabled.
+
+## Guided backup storage
+
+Profiles and credentials are root-only under `/etc/mos-itc/backups/ID`. Rclone
+password obfuscation is reversible. Restic encrypts repository contents; keep
+its password off-server too. FTP does not protect login credentials in transit.
+TLS and SSH host identity checks stay enabled. Private CAs are scoped to a profile.
+Credentials stay out of argv, operation history and review summaries.
+
+Each repository has a local operation lock in addition to Restic remote locks.
+MOS never uses `unlock --remove-all` or automatically repairs a repository. Check
+other hosts before removing stale locks. Cancellation and timeout terminate the
+Restic/Rclone process group. Restores use a new root-controlled directory and
+verification; they do not import SQL or overwrite live configuration.
+
+The tested official Rclone component can be explicitly installed using HTTPS and
+SHA-256. It does not replace the APT binary or silently update itself. Checksums
+do not constitute signature verification. The component must be root-owned and
+not writable by other users.

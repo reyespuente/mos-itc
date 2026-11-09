@@ -1,3 +1,71 @@
+# Validation record — 0.4.0-beta.1
+
+Validated November 8, 2026 (America/Mexico_City). **98 local tests passed, no
+skips**; compilation, Python 3.9 syntax, installer shell syntax and catalog parity
+also passed. On the disposable Ubuntu 26.04.1 AWS guest, 98 tests ran with two
+Apache parser tests skipped because Apache was not installed. On a second,
+fresh Debian 13.4 AWS guest, all 98 tests passed without skips (Python 3.13).
+
+* Fresh installation cancellation left the app uninstalled. Accepted fresh
+  installation and upgrades created configuration recovery points.
+* App-only uninstall restored the original Ubuntu login header. A fresh reinstall
+  verified the revised Essential-file handling without the dpkg-divert warning.
+  Stored backup configuration and passwords retained the same hashes.
+* S3 tests used dedicated random prefixes in the supplied IDrive e2 test bucket,
+  without modifying unrelated repositories. Write/read/delete, initialization,
+  encrypted backup, selected snapshot restore, SHA-256 comparison and full data
+  verification passed.
+* The actual guided S3 form, credential redaction and repository initialization
+  passed, followed by the recommended content backup and the wizard-selected
+  restore. Recovered files matched SHA-256; /etc/hostname and the restore manifest
+  were present, and the target directory remained mode 0700.
+* IDrive ETags caused false MD5 mismatches with the newer generic S3 transport.
+  Multipart content-checksum metadata resolved initialization and passed verified
+  backup/restore and full-data checking without disabling content verification
+  or changing bucket encryption. Initialization now has a 180-second deadline.
+* A missing selected source aborted before remote transfer, recorded failure, and
+  succeeded after correction. Reconnection to an existing repository with its
+  original password and shared local lock identity passed.
+* A real active Restic lock blocked an exclusive check. Abruptly terminated only
+  the test holder, removed the stale lock without --remove-all, then checked the
+  repository successfully. Duplicate local operations were rejected.
+* Daily, weekly and hourly systemd calendars were configured and validated; test
+  schedules were disabled afterwards.
+* Distribution Rclone 1.60.1 hung on SFTP restore. The verified private 1.76.0
+  component installed by MOS passed SFTP, FTP, explicit FTPS and implicit FTPS
+  write/read/delete, initialization, backup, selected restore SHA-256 and full
+  data checking. No comparison-only transport overrides were needed in the final
+  pass. Destination directories were created by MOS.
+* FTP test servers listened only on loopback. Temporary users and server processes
+  were cleaned up. SFTP pinned host identities. FTPS rejected an untrusted test
+  certificate and passed with an explicitly trusted test CA, with TLS checks enabled.
+* MOS independently downloaded, verified SHA-256 and atomically installed its
+  private upstream Rclone component without replacing the APT package. Runtime
+  checksum rejection, profile editing and legacy config selection passed locally.
+* Debian EC2's official `mirror+file` source lists initially blocked installation.
+  The installer and application now inspect every listed mirror, accept official
+  Debian cloud destinations and still reject mixed, empty or untrusted lists.
+  Installer cancellation, fresh installation and an upgrade passed on Debian.
+* Debian passed the guided S3 connection, initialization, recommended backup,
+  selected restore, SHA-256 comparison, full check and existing-repository reconnect.
+  Native SSH menus and the contents summary opened on both distributions.
+* Real Debian MariaDB and PostgreSQL services passed account creation, read/write
+  privilege boundaries, cross-database isolation, password rotation and cleanup.
+  A database-only backup exported both engines; after deleting the two probe
+  databases, manually importing the recovered full SQL dumps restored their exact
+  original data. The full PostgreSQL import reported only the expected duplicate
+  built-in postgres role; no other SQL import errors occurred.
+* Debian daily, Monday-weekly and six-hour timers were enabled and checked, then
+  disabled. A stopped PostgreSQL cluster prevented the backup; after restarting
+  that cluster, a new backup completed successfully and recorded success.
+
+Limits: no production server was changed. Internet S3 validation covered IDrive e2;
+other providers require their own acceptance run. File transports used controlled
+loopback services. SQL export and manual import were validated on Debian; the
+Ubuntu AWS guest had no database engines installed. Restores extract and
+verify files; importing SQL and reactivating services remain administrator tasks.
+Other distributions and future upstream versions require staging validation.
+
 # Validation record — 0.3.0-beta.1
 
 Local suite: **75 passed, no skips**, including input/permission boundaries,

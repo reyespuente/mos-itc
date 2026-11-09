@@ -15,7 +15,7 @@ import sys as python_sys
 import tempfile
 import textwrap
 
-from . import core, web, ops, recovery, users, databases, postgresql
+from . import core, web, ops, recovery, users, databases, postgresql, backups
 from .core import Error, STATE, CONF, SITES
 from .i18n import Translator
 from .terminal import Terminal, Cancelled, WORDMARK, INSTITUTE, DISPLAY_AUTHOR, clean
@@ -147,10 +147,10 @@ class UI:
             return self.terminal.document(title, self.t(str(text)), artwork=artwork)
         print(clean(self.t(str(text))))
 
-    def perform(self, action, allow_pending=False):
+    def perform(self, action, allow_pending=False, backup=False):
         self.operation_cancelled = False
         try:
-            with core.lock(self.sys.dry):
+            with core.lock(self.sys.dry or backup):
                 if (
                     self.sys.exists(STATE / "ssh-pending.json")
                     and action != self.ssh
@@ -1265,62 +1265,534 @@ class UI:
                 )
 
     def backups(self):
-        return self.section(
-            "backups",
-            [
-                ("configure_repository", lambda: self.backups_action(0)),
-                ("edit_rclone_configuration_in_nano", lambda: self.backups_action(1)),
-                ("initialize_restic_repository", lambda: self.backups_action(2)),
-                ("back_up_now", lambda: self.backups_action(3)),
-                ("list_snapshots", lambda: self.backups_action(4)),
-                ("check_repository", lambda: self.backups_action(5)),
-                ("schedule_daily_backup", lambda: self.backups_action(6)),
-                ("restore_latest_to_new_directory", lambda: self.backups_action(7)),
+        while True:
+            profiles = backups.profiles(self.sys)
+            rows = (
+                ["backup_add"]
+                + [
+                    self.t(p["label"])
+                    + "  ·  "
+                    + self.t("backup_storage_" + p["transport"])
+                    for p in profiles
+                ]
+                + ["backup_guide", "back"]
+            )
+            choice = self.menu(
+                "backups",
+                rows,
+                details={
+                    "backup_add": self.t("backup_wizard_hint"),
+                    "backup_guide": self.t("backup_guide_text"),
+                },
+            )
+            if choice is None or choice == len(rows) - 1:
+                return
+            if choice == 0:
+                self.perform(self.backup_wizard, backup=True)
+            elif choice == len(rows) - 2:
+                self.show(self.t("backup_guide_text"), "backup_guide")
+            else:
+                self.backup_profile(profiles[choice - 1]["id"])
+
+    def backup_dependencies(self):
+        missing = [p for p in ("restic", "rclone") if not core.installed(self.sys, p)]
+        if missing:
+            if not self.confirm(
+                self.t("backup_install_tools", packages=", ".join(missing))
+            ):
+                raise Cancelled
+            with core.lock(self.sys.dry):
+                core.refresh(self.sys)
+                args, plan = core.apt_plan(self.sys, missing)
+                if not self.confirm("apply_package_installation", details=plan):
+                    raise Cancelled
+                core.apply_packages(self.sys, args)
+
+    def backup_runtime(self):
+        if backups.compatible_rclone(self.sys):
+            return self.show(self.t("backup_runtime_ready"), "backup_setup")
+        if not self.confirm("backup_runtime_install"):
+            raise Cancelled
+        self.notify("backup_runtime_downloading")
+        backups.install_rclone_runtime(self.sys)
+        self.show(
+            self.t("backup_runtime_ready")
+            + "\n"
+            + self.sys.run([backups.rclone_program(self.sys), "version"]).splitlines()[
+                0
             ],
+            "backup_setup",
         )
 
-    def backups_action(self, choice):
+    def backup_sources(self, profile=None):
+        options = [
+            "backup_content_recommended",
+            "backup_content_web",
+            "backup_content_databases",
+            "backup_content_custom",
+            "back",
+        ]
+        choice = self.menu(
+            "backup_what",
+            options,
+            details={key: self.t(key + ".description") for key in options[:-1]},
+        )
+        if choice in (None, 4):
+            raise Cancelled
         if choice == 0:
-            repo = self.ask("restic_repository", "rclone:remote:mos-itc")
-            password = self.ask("restic_password", secret=True)
-            if password != self.ask("repeat_password", secret=True):
-                raise Error("passwords_do_not_match")
-            s3 = {}
-            if repo.startswith("s3:"):
-                s3 = {
-                    k: self.ask(k, secret="SECRET" in k)
-                    for k in (
-                        "AWS_ACCESS_KEY_ID",
-                        "AWS_SECRET_ACCESS_KEY",
-                        "AWS_DEFAULT_REGION",
-                    )
-                }
-            if self.confirm("confirm_backup_config"):
-                ops.configure_backup(self.sys, repo, password, s3)
-        elif choice == 1:
-            content = self.editor(
-                "rclone_configuration", self.sys.read(CONF / "rclone.conf")
+            return ["/etc", str(STATE), str(SITES)], True
+        if choice == 1:
+            return [str(SITES)], False
+        if choice == 2:
+            return [], True
+        paths = ["/etc", str(SITES), str(STATE), "/home", "/root"]
+        current = set((profile or {}).get("paths", []))
+        selected = self.menu(
+            "backup_select_paths",
+            paths,
+            selected={i for i, p in enumerate(paths) if p in current},
+        )
+        if selected is None:
+            raise Cancelled
+        result = [paths[i] for i in sorted(selected)]
+        extra = self.ask("backup_extra_paths")
+        result += [v.strip() for v in extra.split(",") if v.strip()]
+        databases = self.yes("backup_include_databases")
+        return backups.validate_sources(result, databases), databases
+
+    def backup_scan_host(self, host, port):
+        keys = self.sys.run(
+            ["ssh-keyscan", "-T", "8", "-p", str(port), host], check=False, timeout=15
+        )
+        keys = (
+            "\n".join(
+                line for line in keys.splitlines() if line and not line.startswith("#")
             )
-            if self.confirm("save_rclone_configuration"):
-                self.sys.write(CONF / "rclone.conf", content)
-        elif choice in (2, 3, 4, 5):
-            action = {2: "init", 3: "backup", 4: "snapshots", 5: "check"}[choice]
-            if self.confirm(self.t("restic_action_action", action=action)):
-                self.show(ops.backup(self.sys, action))
-        elif choice == 6:
-            ops.backup_env(self.sys)
-            if self.confirm("confirm_backup_schedule"):
-                ops.install_timer(
-                    self.sys,
-                    "backup",
-                    "*-*-* 02:30:00",
-                    "/usr/local/bin/mos-itc backup run",
-                    "remote backup",
+            + "\n"
+        )
+        if not keys.strip():
+            raise Error("backup_host_key_missing")
+        with tempfile.TemporaryDirectory(prefix="mos-host-key-") as tmp:
+            path = Path(tmp) / "known_hosts"
+            self.sys.write(path, keys)
+            fingerprints = (
+                self.sys.run(["ssh-keygen", "-lf", path])
+                if not self.sys.dry
+                else "PREVIEW"
+            )
+        if not self.confirm("backup_host_key_trust", details=fingerprints):
+            raise Cancelled
+        return keys
+
+    def backup_wizard(self, existing=None):
+        self.backup_dependencies()
+        if existing and existing["id"] == "legacy":
+            raise Error("backup_legacy_readonly")
+        identifier = (
+            existing["id"] if existing else core.name(self.ask("backup_identifier"))
+        )
+        label = self.ask("backup_label", existing["label"] if existing else identifier)
+        kinds = [
+            "s3",
+            "s3-compatible",
+            "sftp",
+            "ftps",
+            "ftps-implicit",
+            "ftp",
+            "rclone",
+        ]
+        choice = self.menu(
+            "backup_storage_type",
+            ["backup_storage_" + k for k in kinds] + ["back"],
+            details={
+                "backup_storage_" + k: self.t("backup_storage_" + k + ".description")
+                for k in kinds
+            },
+        )
+        if choice is None or choice == len(kinds):
+            raise Cancelled
+        kind = kinds[choice]
+        if kind in backups.FILE_TRANSPORTS and not backups.compatible_rclone(self.sys):
+            self.backup_runtime()
+        fields = {}
+        attachments = {}
+        if kind in ("s3", "s3-compatible"):
+            if kind == "s3-compatible":
+                fields["endpoint"] = self.ask("backup_s3_endpoint")
+            fields["bucket"] = self.ask("backup_bucket")
+            fields["prefix"] = self.ask(
+                "backup_remote_prefix", "mos-itc/" + os.uname().nodename
+            )
+            fields["region"] = self.ask(
+                "backup_region", "us-east-1" if kind == "s3" else ""
+            )
+            fields["access_key"] = self.ask("backup_access_key", secret=True)
+            fields["secret_key"] = self.ask("backup_secret_key", secret=True)
+        elif kind == "rclone":
+            fields["repository"] = self.ask(
+                "backup_existing_rclone", "rclone:remote:mos-itc/" + identifier
+            )
+            fields["config_file"] = self.ask(
+                "backup_existing_rclone_config", str(CONF / "rclone.conf")
+            )
+        else:
+            if kind == "ftp" and not self.confirm("backup_plain_ftp_warning"):
+                raise Cancelled
+            fields["host"] = self.ask("backup_host")
+            fields["port"] = int(
+                self.ask(
+                    "port",
+                    (
+                        "22"
+                        if kind == "sftp"
+                        else "990" if kind == "ftps-implicit" else "21"
+                    ),
                 )
-        elif choice == 7:
-            target = self.ask("restore_directory_must_not_exist", "/srv/mos-restore")
-            if self.confirm(self.t("restore_latest_snapshot_to_path", path=target)):
-                self.show(ops.backup(self.sys, "restore", target))
+            )
+            fields["user"] = self.ask("backup_remote_user")
+            fields["path"] = self.ask(
+                "backup_remote_directory", "mos-itc/" + identifier
+            )
+            if kind == "sftp":
+                attachments["known_hosts"] = self.backup_scan_host(
+                    fields["host"], fields["port"]
+                )
+                fields["known_hosts_file"] = str(
+                    backups.folder(identifier) / "known_hosts"
+                )
+                auth = self.menu(
+                    "backup_auth", ["backup_auth_password", "backup_auth_key", "back"]
+                )
+                if auth in (None, 2):
+                    raise Cancelled
+                if auth == 1:
+                    key = core.safe_path(self.ask("backup_key_path"))
+                    attachments["identity"] = web.read_pem_file(key)
+                    fields["key_file"] = str(backups.folder(identifier) / "identity")
+                    fields["key_password"] = self.ask(
+                        "backup_key_passphrase", secret=True
+                    )
+                else:
+                    fields["password"] = self.ask("backup_remote_password", secret=True)
+            else:
+                fields["password"] = self.ask("backup_remote_password", secret=True)
+        if kind in ("s3-compatible", "ftps", "ftps-implicit"):
+            ca = self.ask("backup_ca_path")
+            if ca:
+                attachments["ca.pem"] = web.read_pem_file(core.safe_path(ca))
+        password = self.ask(
+            (
+                "backup_encryption_password_keep"
+                if existing
+                else "backup_encryption_password"
+            ),
+            secret=True,
+        )
+        if existing and not password:
+            password = self.sys.read(backups.folder(identifier) / "password").rstrip(
+                "\n"
+            )
+        elif password != self.ask("repeat_password", secret=True):
+            raise Error("passwords_do_not_match")
+        if existing:
+            paths, databases = existing.get("paths", []), existing.get(
+                "databases", True
+            )
+        else:
+            paths, databases = self.backup_sources()
+        if kind in ("s3", "s3-compatible"):
+            destination = (
+                backups.endpoint(
+                    fields.get("endpoint")
+                    or "https://s3." + fields["region"] + ".amazonaws.com"
+                )
+                + "/"
+                + fields["bucket"]
+                + "/"
+                + fields["prefix"]
+            )
+        elif kind == "rclone":
+            destination = fields["repository"]
+        else:
+            destination = (
+                kind
+                + "://"
+                + fields["host"]
+                + ":"
+                + str(fields["port"])
+                + "/"
+                + fields["path"].lstrip("/")
+            )
+        summary = self.t(
+            "backup_review_text",
+            destination=destination,
+            label=label,
+            transport=kind,
+            paths="\n".join(paths) or "—",
+            databases=self.t("ui_yes" if databases else "ui_no"),
+        )
+        if not self.confirm("backup_save_destination", details=summary):
+            return
+        profile = backups.create(
+            self.sys,
+            identifier,
+            label,
+            password,
+            kind,
+            fields,
+            paths,
+            databases,
+            attachments,
+            replace=bool(existing),
+        )
+        self.show(self.t("backup_password_keep"), "backup_setup")
+        self.show(self.t(backups.test_connection(self.sys, profile)), "backup_setup")
+        choice = self.menu(
+            "backup_initialize_choice",
+            ["backup_new_repository", "backup_use_existing", "backup_do_later"],
+            details={
+                "backup_new_repository": self.t("backup_new_repository.description"),
+                "backup_use_existing": self.t("backup_use_existing.description"),
+            },
+        )
+        if choice == 0 and self.confirm("backup_init_warning"):
+            self.show(backups.operate(self.sys, identifier, "init"), "backup_setup")
+        elif choice == 1:
+            rows = backups.snapshots(self.sys, profile)
+            self.show(self.t("backup_connected", count=len(rows)), "backup_setup")
+        self.show(self.t("backup_setup_complete"), "backup_setup")
+
+    def backup_summary(self, profile):
+        state = backups.status(self.sys, profile)
+        schedule = self.t("backup_schedule_off")
+        kind = profile.get("schedule_kind")
+        if kind in ("daily", "weekly", "hours"):
+            schedule = self.t(
+                "backup_schedule_" + kind + "_value",
+                value=profile.get("schedule_value", ""),
+            )
+        elif profile.get("schedule"):
+            schedule = profile["schedule"]
+        return self.t(
+            "backup_summary_text",
+            label=profile["label"],
+            transport=profile["transport"],
+            destination=profile.get("destination", profile["repository"]),
+            paths="\n".join(profile.get("paths", [])) or "—",
+            databases=self.t("ui_yes" if profile.get("databases", True) else "ui_no"),
+            schedule=schedule,
+            state=self.t("backup_state_" + state.get("state", "never")),
+            action=(
+                self.t("backup_action_" + state["action"])
+                if state.get("action")
+                else "—"
+            ),
+            last_backup=state.get("last_backup") or "—",
+            time=state.get("time", "—"),
+        )
+
+    def backup_profile(self, identifier):
+        entries = [
+            "backup_summary",
+            "back_up_now",
+            "backup_copies_restore",
+            "backup_schedule",
+            "backup_what",
+            "backup_maintenance",
+            "backup_events",
+            "backup_guide",
+            "backup_edit_connection",
+            "back",
+        ]
+        while True:
+            profile = backups.load(self.sys, identifier)
+            choice = self.menu(
+                profile["label"],
+                entries,
+                details={
+                    "backup_summary": self.backup_summary(profile),
+                    "back_up_now": self.t("backup_now_hint"),
+                    "backup_schedule": self.t("backup_schedule_hint"),
+                },
+            )
+            if choice in (None, len(entries) - 1):
+                return
+            if choice == 0:
+                self.show(self.backup_summary(profile), "backup_summary")
+            elif choice == 1:
+
+                def run():
+                    if self.confirm(
+                        "backup_run_review", details=self.backup_summary(profile)
+                    ):
+                        self.show(
+                            backups.operate(self.sys, identifier, "backup"),
+                            "back_up_now",
+                        )
+
+                self.perform(run, backup=True)
+            elif choice == 2:
+                self.perform(lambda: self.backup_restore(profile), backup=True)
+            elif choice == 3:
+                self.perform(lambda: self.backup_schedule(profile), backup=True)
+            elif choice == 4:
+
+                def sources():
+                    paths, db = self.backup_sources(profile)
+                    if self.confirm("backup_save_sources", details="\n".join(paths)):
+                        backups.save_sources(self.sys, profile, paths, db)
+
+                self.perform(sources, backup=True)
+            elif choice == 5:
+                self.backup_maintenance(profile)
+            elif choice == 6:
+                rows = [
+                    json.loads(line)
+                    for line in backups.events(self.sys, profile).splitlines()
+                    if line.strip()
+                ]
+                text = "\n\n".join(
+                    r.get("time", "")[:19]
+                    + " UTC · "
+                    + self.t("backup_action_" + r.get("action", ""))
+                    + " · "
+                    + self.t("backup_state_" + r["state"])
+                    + f' · {r.get("duration",0)} s'
+                    + ("\n" + self.t(r["error"]) if r.get("error") else "")
+                    for r in rows
+                )
+                self.show(text or self.t("no_operations_yet"), "backup_events")
+            elif choice == 7:
+                self.show(self.t("backup_guide_text"), "backup_guide")
+            elif choice == 8:
+                if self.confirm("backup_edit_warning"):
+                    self.perform(lambda: self.backup_wizard(profile), backup=True)
+
+    def backup_restore(self, profile):
+        rows = backups.snapshots(self.sys, profile)
+        if not rows:
+            return self.show(self.t("backup_no_copies"))
+        rows = sorted(rows, key=lambda r: r.get("time", ""), reverse=True)
+        choice = self.menu(
+            "backup_choose_copy",
+            [
+                r.get("time", "")[:19]
+                + " UTC  ·  "
+                + r.get("hostname", "")
+                + "  ·  "
+                + r["id"][:8]
+                for r in rows
+            ]
+            + ["back"],
+        )
+        if choice is None or choice == len(rows):
+            return
+        row = rows[choice]
+        action = self.menu(
+            "backup_copy_actions",
+            ["backup_copy_details", "backup_restore_copy", "back"],
+        )
+        if action == 0:
+            self.show(json.dumps(row, indent=2), "backup_copy_details")
+        elif action == 1:
+            target = self.ask(
+                "backup_restore_directory", "/srv/mos-restore-" + row["id"][:8]
+            )
+            if self.confirm(
+                "backup_restore_warning",
+                details=self.t(
+                    "backup_restore_review", snapshot=row["id"][:8], target=target
+                ),
+            ):
+                self.show(
+                    backups.operate(
+                        self.sys, profile["id"], "restore", target, row["id"]
+                    ),
+                    "backup_restore_copy",
+                )
+                self.show(
+                    self.t("backup_restore_done", target=target), "backup_restore_copy"
+                )
+
+    def backup_schedule(self, profile):
+        kinds = ["daily", "weekly", "hours", "off"]
+        choice = self.menu(
+            "backup_schedule", ["backup_schedule_" + k for k in kinds] + ["back"]
+        )
+        if choice in (None, 4):
+            return
+        kind = kinds[choice]
+        value = ""
+        if kind in ("daily", "weekly"):
+            value = self.ask("backup_time", "02:30")
+        elif kind == "hours":
+            intervals = [1, 2, 3, 4, 6, 8, 12]
+            selected = self.menu(
+                "backup_interval", [str(h) + " h" for h in intervals] + ["back"]
+            )
+            if selected is None or selected == len(intervals):
+                return
+            value = str(intervals[selected])
+        if kind != "off":
+            backups.calendar(kind, value)
+        preview = (
+            self.t("backup_schedule_" + kind + "_value", value=value)
+            if kind != "off"
+            else self.t("backup_schedule_off")
+        )
+        if self.confirm(
+            "backup_confirm_schedule",
+            details=preview + "\n" + self.t("backup_schedule_hint"),
+        ):
+            backups.schedule(self.sys, profile, kind, value)
+
+    def backup_maintenance(self, profile):
+        actions = [
+            ("backup_test_connection", None),
+            ("backup_runtime_tools", "runtime"),
+            ("initialize_restic_repository", "init"),
+            ("check_repository", "check"),
+            ("backup_check_data", "check-data"),
+            ("backup_locks", "locks"),
+            ("backup_unlock", "unlock"),
+            ("backup_repair_index", "repair-index"),
+        ]
+        while True:
+            choice = self.menu(
+                "backup_maintenance", [key for key, _ in actions] + ["back"]
+            )
+            if choice is None or choice == len(actions):
+                return
+            label, action = actions[choice]
+
+            def perform():
+                if action == "runtime":
+                    return self.backup_runtime()
+                if action is None:
+                    return self.show(
+                        self.t(backups.test_connection(self.sys, profile)), label
+                    )
+                warning = {
+                    "init": "backup_init_warning",
+                    "check": "backup_check_warning",
+                    "check-data": "backup_check_data_warning",
+                    "locks": "backup_locks_warning",
+                    "unlock": "backup_unlock_warning",
+                    "repair-index": "backup_repair_index_warning",
+                }[action]
+                word = (
+                    "UNLOCK"
+                    if action == "unlock"
+                    else "REPAIR" if action == "repair-index" else None
+                )
+                if self.confirm(warning, word):
+                    self.show(
+                        backups.operate(self.sys, profile["id"], action)
+                        or self.t("ui_success"),
+                        label,
+                    )
+
+            self.perform(perform, backup=True)
 
     def speed(self):
         if not core.installed(self.sys, "speedtest-cli"):

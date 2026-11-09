@@ -135,6 +135,18 @@ class SafetyTests(unittest.TestCase):
             system.external = True
             core.repository_check(system)
 
+    def test_debian_cloud_mirror_lists(self):
+        system = Preview()
+        uri = "mirror+file:///etc/apt/mirrors/debian.list"
+        for content, accepted in (
+            ("# official\nhttps://cdn-aws.deb.debian.org/debian\n", True),
+            ("https://deb.debian.org/debian\nhttps://evil.example/debian\n", False),
+            ("# empty\n", False),
+            ("https://deb.debian.org.evil.example/debian\n", False),
+        ):
+            with patch.object(system, "read", return_value=content):
+                self.assertEqual(core.approved_source(system, uri), accepted)
+
     def test_apt_rejects_implicit_dependency_removal(self):
         system = Preview()
 

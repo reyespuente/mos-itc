@@ -108,16 +108,35 @@ if ((${#sources[@]})); then
         split(line,parts,/[ \t]+/); print parts[2]
     }}' "${sources[@]}" | tr ' \t' '\n' | sed '/^$/d')
 fi
+official_source() {
+    case "$1" in
+        http://deb.debian.org/*|https://deb.debian.org/*|http://*.deb.debian.org/*|https://*.deb.debian.org/*|http://security.debian.org/*|https://security.debian.org/*|http://archive.ubuntu.com/*|https://archive.ubuntu.com/*|http://*.archive.ubuntu.com/*|https://*.archive.ubuntu.com/*|http://security.ubuntu.com/*|https://security.ubuntu.com/*|http://ports.ubuntu.com/*|https://ports.ubuntu.com/*) return 0 ;;
+    esac
+    return 1
+}
+approved_source() {
+    local entry mirror_file found=false
+    if official_source "$1"; then return 0; fi
+    if [[ "$1" =~ ^mirror\+file:///etc/apt/mirrors/[A-Za-z0-9_.-]+$ ]]; then
+        mirror_file="${1#mirror+file://}"
+        [[ -f "$mirror_file" && ! -L "$mirror_file" ]] || return 1
+        while read -r entry _; do
+            [[ -n "$entry" && "$entry" != \#* ]] || continue
+            official_source "$entry" || return 1
+            found=true
+        done < "$mirror_file"
+        [[ "$found" == true ]] && return 0
+    fi
+    return 1
+}
 for uri in "${source_uris[@]}"; do
-    case "$uri" in
-        http://deb.debian.org/*|https://deb.debian.org/*|http://security.debian.org/*|https://security.debian.org/*|http://archive.ubuntu.com/*|https://archive.ubuntu.com/*|http://*.archive.ubuntu.com/*|https://*.archive.ubuntu.com/*|http://security.ubuntu.com/*|https://security.ubuntu.com/*|http://ports.ubuntu.com/*|https://ports.ubuntu.com/*) ;;
-        *)
+    if ! approved_source "$uri"; then
             if [[ "$allow_external" != true ]]; then
                 echo "External/custom source detected: $uri"
                 echo 'Disable it or explicitly use --allow-external-repositories at your own responsibility.'
                 exit 1
-            fi ;;
-    esac
+            fi
+    fi
 done
 if [[ "$allow_external" == true ]]; then
     read -r -p 'Third-party package sources are your responsibility. Type ALLOW: ' answer
@@ -153,7 +172,7 @@ flock -n 9 || { echo 'A MOS operation is running. Close MOS and try again.'; exi
 app_stage="$(mktemp -d /opt/.mos-itc-stage-XXXXXXXX)"
 chmod 0755 "$app_stage"
 install -d -m 0755 "$app_stage/mos_itc" "$app_stage/languages" "$app_stage/assets"
-for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py users.py databases.py postgresql.py; do
+for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py users.py databases.py postgresql.py backups.py; do
     [[ -f "$source_dir/mos_itc/$file" && ! -L "$source_dir/mos_itc/$file" ]] || { echo "Missing or unsafe file: $file"; exit 1; }
     install -m 0644 "$source_dir/mos_itc/$file" "$app_stage/mos_itc/$file"
 done
@@ -184,7 +203,13 @@ chown -R root:root /opt/mos-itc /etc/mos-itc /var/lib/mos-itc /usr/local/bin/mos
 # Brand the login welcome while leaving update/reboot notices in place.
 if [[ -d /etc/update-motd.d ]]; then
     if [[ -f /etc/update-motd.d/00-header ]] && ! dpkg-divert --list /etc/update-motd.d/00-header | grep -q .; then
-        dpkg-divert --local --rename --add /etc/update-motd.d/00-header
+        # This optional MOTD file belongs to an Essential package. Preserve it
+        # explicitly instead of asking dpkg-divert to rename Essential files.
+        [[ ! -e /etc/update-motd.d/00-header.distrib ]] || { echo 'Existing MOTD diversion target; refusing to overwrite'; exit 1; }
+        cp -p /etc/update-motd.d/00-header /etc/update-motd.d/00-header.distrib
+        dpkg-divert --local --no-rename --add /etc/update-motd.d/00-header
+        printf '#!/bin/sh\n# MOS ITC login header is provided by 00-mos-itc.\nexit 0\n' > /etc/update-motd.d/00-header
+        chmod 0755 /etc/update-motd.d/00-header
         printf '["/etc/update-motd.d/00-header"]\n' > /var/lib/mos-itc/motd-diversions.json
     fi
     cat > /etc/update-motd.d/00-mos-itc <<'MOTD'

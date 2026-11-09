@@ -15,7 +15,11 @@ from .ui import UI
 def uninstall(system):
     if system.exists(STATE / "ssh-pending.json"):
         raise Error("error_confirm_or_roll_back_the_pending_ssh_change")
-    for label in ("metrics", "backup", "clamav", "ssh-recovery"):
+    backup_labels = [
+        path.name[len("mos-") : -len(".timer")]
+        for path in Path("/etc/systemd/system").glob("mos-backup-*.timer")
+    ]
+    for label in ("metrics", "backup", "clamav", "ssh-recovery", *backup_labels):
         system.run(
             ["systemctl", "disable", "--now", f"mos-{label}.timer"],
             mutate=True,
@@ -31,11 +35,15 @@ def uninstall(system):
     diversion_state = STATE / "motd-diversions.json"
     for original in json.loads(system.read(diversion_state, "[]")):
         if original in ("/etc/update-motd.d/00-header",):
+            saved = Path(original + ".distrib")
             system.run(
-                ["dpkg-divert", "--local", "--rename", "--remove", original],
+                ["dpkg-divert", "--local", "--no-rename", "--remove", original],
                 mutate=True,
             )
+            if saved.exists() or system.dry:
+                system.run(["mv", "--", saved, original], mutate=True)
     system.delete(diversion_state)
+    system.delete("/usr/local/lib/mos-itc/rclone")
     target = Path("/opt/mos-itc")
     if target.is_symlink():
         raise Error("error_unexpected_application_directory_symlink")
@@ -92,9 +100,24 @@ def parser():
     sub.add_parser("ssl", help="Certificate manager")
     backup = sub.add_parser("backup")
     b = backup.add_subparsers(dest="action", required=True)
-    for action in ("configure", "init", "run", "snapshots", "check"):
-        b.add_parser(action)
+    for action in (
+        "configure",
+        "init",
+        "run",
+        "snapshots",
+        "check",
+        "check-data",
+        "locks",
+        "unlock",
+        "repair-index",
+    ):
+        command = b.add_parser(action)
+        command.add_argument(
+            "--repository", help="Backup profile ID (required if more than one exists)"
+        )
     restore = b.add_parser("restore")
+    restore.add_argument("--repository")
+    restore.add_argument("--snapshot", default="latest")
     restore.add_argument("target", help="New directory; existing targets are refused")
     ssh = sub.add_parser("ssh")
     s = ssh.add_subparsers(dest="action", required=True)
@@ -196,7 +219,9 @@ def main(argv=None):
             or (args.command == "website" and args.action == "manage")
             or (args.command == "backup" and args.action == "configure")
         )
-        with core.lock(system.dry or interactive or recovery):
+        with core.lock(
+            system.dry or interactive or recovery or args.command == "backup"
+        ):
             if system.exists(STATE / "ssh-pending.json") and args.command not in (
                 "ssh",
                 "internal",
@@ -265,11 +290,26 @@ def main(argv=None):
                     if ui.confirm(
                         ui.t("restore_latest_snapshot_to_path", path=args.target)
                     ):
-                        print(ops.backup(system, "restore", args.target))
+                        print(
+                            ops.backup(
+                                system,
+                                "restore",
+                                args.target,
+                                args.repository,
+                                args.snapshot,
+                            )
+                        )
                 else:
+                    if args.action in ("unlock", "repair-index") and not ui.confirm(
+                        "backup_" + args.action.replace("-", "_") + "_warning",
+                        "UNLOCK" if args.action == "unlock" else "REPAIR",
+                    ):
+                        return 0
                     print(
                         ops.backup(
-                            system, "backup" if args.action == "run" else args.action
+                            system,
+                            "backup" if args.action == "run" else args.action,
+                            repository=args.repository,
                         )
                     )
             elif args.command == "ssh":

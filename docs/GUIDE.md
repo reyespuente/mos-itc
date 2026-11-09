@@ -7,7 +7,7 @@ Created by **Reyes Guadalupe Puente Balcazar** as an initiative at the Instituto
 Tecnológico de Celaya to make server administration easier from one place.
 Free to use under the MIT license. This is not a claim of official ITC endorsement.
 
-**Version: 0.3.0-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
+**Version: 0.4.0-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
 distribution matrix has not yet been validated.
 
 The terminal banner uses ITC's published blue `#1B396A` and green `#117533`:
@@ -89,7 +89,7 @@ full-machine rollback is required. Keep restore points private: `/etc` contains 
 A standalone copy of the installer can fetch a published release automatically:
 
 ```bash
-sudo bash install.sh --repo reyespuente/mos-itc --ref v0.3.0-beta.1
+sudo bash install.sh --repo reyespuente/mos-itc --ref v0.4.0-beta.1
 ```
 
 Download the installer as a file before running it. Interactive input is required;
@@ -213,26 +213,11 @@ Use stronger isolation before hosting mutually untrusted student workloads.
 
 ### Backups
 
-Install the backup packages, configure Rclone's remote in nano or use a native
-S3/SFTP Restic URL, choose a strong password, then explicitly initialize the repo.
-Example repository forms:
+Use **Backups → Add storage** for S3/S3-compatible, SFTP, FTP/FTPS or an existing
+Rclone configuration. Each destination has content selection, a schedule, status
+and snapshot selection for verified recovery into a new directory. See the
+[backup guide](BACKUPS.md) for setup, limits and stale-lock recovery.
 
-```text
-rclone:remote:mos-itc
-s3:https://s3.example.org/bucket/mos-itc
-sftp:backup@backup.example.org:/srv/backups/mos-itc
-```
-
-Backups include `/etc`, MOS state and managed site homes. MariaDB and PostgreSQL
-are exported before backup when installed; live database directories are not used
-as a substitute for database dumps. MariaDB's transactional dump does not guarantee
-consistency for nontransactional tables or across external application services.
-Coordinate application writes when an application-consistent restore is required.
-
-Daily scheduling is opt-in. No automatic pruning runs. Restore goes to a new
-directory and never overwrites `/` or an existing target. File/database restoration
-and service activation require administrator review. Keep the Restic password
-offline and practice restoration.
 
 ## Commands
 

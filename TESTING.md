@@ -64,9 +64,31 @@ changes. Begin with Debian 13 and Ubuntu Server 24.04, 2 vCPU, 3 GiB RAM and a
 | OS | State |
 |---|---|
 | Ubuntu 26.04.1 | Real KVM acceptance run completed; see TEST_RESULTS.md |
-| Debian 13 / Ubuntu 24.04 | Separate VM acceptance pending |
+| Debian 13.4 | EC2 installer, guided backups, SQL recovery and permissions validated; full web/SSH checklist still pending |
+| Ubuntu 24.04 | Separate VM acceptance pending |
 | Debian 12 / Ubuntu 22.04 | Separate VM acceptance pending |
 | Debian 11 | Compatibility target only; review extended security coverage |
 
 Do not mark a row validated until the checks were actually completed on that OS.
 The initial release is a testable beta, not a production certification.
+
+## Guided backup regression
+
+Use a dedicated prefix in a test bucket, never an existing production repository.
+Verify the write/read/delete probe, fresh initialization and connection to an
+existing repository with its original password. Run each content preset, modify
+a source after a successful backup, restore the selected snapshot into a new
+root-controlled directory and compare hashes. Validate SQL exports in an isolated
+database before treating them as recoverable application data.
+
+Test daily, weekly and hourly timers and their disable action. Hold an actual
+Restic lock, verify that another operation is rejected, then terminate only the
+test holder and confirm stale-only unlocking and repository checking. Do not
+force-unlock another host or automatically repair indexes. Review status after
+interruption and ensure no credentials appear in reviews or events.
+
+Test SFTP with pinned host keys and FTP/FTPS against temporary loopback services.
+Keep TLS verification enabled; an untrusted certificate must fail. Repeat with
+a supplied trusted CA. File transports must use a compatible Rclone version;
+verify checksum rejection before private runtime installation. The upstream
+component is separate from the APT package.

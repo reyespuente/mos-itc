@@ -3,7 +3,7 @@
 Herramienta de terminal creada por **Reyes Guadalupe Puente Balcazar** como una
 iniciativa en el Instituto Tecnológico de Celaya. Licencia MIT, de libre uso.
 
-Esta es la **versión 0.3.0-beta.1**. Prueba la instalación completa en una VM
+Esta es la **versión 0.4.0-beta.1**. Prueba la instalación completa en una VM
 desechable antes de utilizarla en un VPS con datos reales.
 
 ## Abrir los menús en Linux Mint sin instalar servicios
@@ -125,3 +125,15 @@ Las bases externas se muestran sin adoptar sus permisos. Para los sitios actuale
 **Ver rendimiento → Dashboard del servidor** muestra carga, CPU, RAM, swap, disco,
 inodos, tráfico de red por segundo, servicios y procesos con más memoria. Usa las
 flechas para desplazar el contenido.
+
+## Respaldos guiados
+
+Abre **Respaldos → Agregar almacenamiento · asistente**. Elige S3, S3 compatible,
+SFTP, FTP/FTPS o Rclone existente. El formulario solicita los accesos, la contraseña
+de cifrado y el contenido. Después prueba la conexión y distingue crear un
+repositorio nuevo de conectar uno existente. Ejecuta el primer respaldo antes de
+programarlo. En el destino puedes configurar horarios, corregir la conexión y
+restaurar una copia elegida a una carpeta nueva.
+
+La [guía de respaldos](docs/BACKUPS.md) explica los campos, qué se incluye y cómo
+verificar una restauración. No se sobrescriben bases o servicios automáticamente.
