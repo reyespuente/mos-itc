@@ -3,6 +3,7 @@
 import curses
 import getpass
 import contextlib
+import datetime as dt
 import io
 from collections import deque
 import json
@@ -14,8 +15,24 @@ import subprocess
 import sys as python_sys
 import tempfile
 import textwrap
+import threading
+import urllib.request
 
-from . import core, web, ops, recovery, users, databases, postgresql, backups
+from . import (
+    core,
+    web,
+    ops,
+    recovery,
+    users,
+    databases,
+    postgresql,
+    backups,
+    settings,
+    network,
+    updates,
+    transfers,
+)
+from .presentation import Table, table, rows as aligned_rows, size
 from .core import Error, STATE, CONF, SITES
 from .i18n import Translator
 from .terminal import Terminal, Cancelled, WORDMARK, INSTITUTE, DISPLAY_AUTHOR, clean
@@ -33,6 +50,7 @@ class UI:
         self.terminal = None
         self.activity = deque(maxlen=500)
         self.notice = ""
+        self.context = {}
 
     def t(self, key, **values):
         return self.translator(key, **values)
@@ -54,6 +72,7 @@ class UI:
             or os.environ.get("TERM") in (None, "", "dumb")
         ):
             return action()
+        threading.Thread(target=self.load_context, daemon=True).start()
         ui = self
 
         class Output(io.TextIOBase):
@@ -67,6 +86,7 @@ class UI:
 
         def run(window):
             self.terminal = Terminal(window, self.t, self.sys.dry)
+            self.terminal.context = self.context
             self.sys.progress = self.terminal.progress
             self.sys.output = self.notify
             try:
@@ -144,7 +164,11 @@ class UI:
 
     def show(self, text, title="ui_report", artwork=False):
         if self.terminal:
-            return self.terminal.document(title, self.t(str(text)), artwork=artwork)
+            return self.terminal.document(
+                title,
+                text if isinstance(text, Table) else self.t(str(text)),
+                artwork=artwork,
+            )
         print(clean(self.t(str(text))))
 
     def perform(self, action, allow_pending=False, backup=False):
@@ -250,15 +274,7 @@ class UI:
         if choice == 0:
             self.package_selection()
         elif choice == 1:
-            self.show(
-                self.sys.run(
-                    [
-                        "dpkg-query",
-                        "-W",
-                        "-f=${binary:Package}\t${Version}\t${Status}\n",
-                    ]
-                )
-            )
+            self.installed_inventory()
         elif choice == 2 and self.confirm(
             "apt_update_refresh_available_package_indexes"
         ):
@@ -356,6 +372,20 @@ class UI:
                 self.configure()
 
     def configure(self):
+        if ops.profile_applied(self.sys):
+            return self.show(
+                self.t("settings_already_configured"), "automatic_configuration"
+            )
+        if not core.php_versions(self.sys, True) and not core.installed(
+            self.sys, "apache2"
+        ):
+            choice = self.menu(
+                "setup_stack_first", ["install_web_server", "setup_system_only", "back"]
+            )
+            if choice in (None, 2):
+                return
+            if choice == 0:
+                return self.install_web()
         zone = ops.timezone(self.ask("timezone", "America/Mexico_City"))
         host = self.ask("hostname", "mos-server")
         versions = core.php_versions(self.sys, True)
@@ -377,35 +407,59 @@ class UI:
         while True:
             sites = self.sys.data()["sites"]
             hosts = sorted(sites)
-            rows = ["create_website"] + [
-                f"{host}  ·  "
-                + (sites[host].get("php") or self.t("static_website"))
-                + "  ·  "
-                + sites[host]["ssl"]
-                for host in hosts
-            ]
-            rows += ["import_existing_static_php_website_beta", "back"]
-            choice = self.menu("websites", rows)
-            if choice is None or choice == len(rows) - 1:
+            labels = aligned_rows(
+                [
+                    (
+                        h,
+                        sites[h].get("php") or self.t("static_website"),
+                        self.ssl_label(sites[h]["ssl"]),
+                    )
+                    for h in hosts
+                ],
+                [48, 10, 14],
+            )
+            options = (
+                ["create_website"]
+                + labels
+                + ["import_existing_static_php_website_beta", "back"]
+            )
+            choice = self.menu(
+                "websites",
+                options,
+                details={
+                    label: self.site_summary(sites[h])
+                    for h, label in zip(hosts, labels)
+                },
+            )
+            if choice is None or choice == len(options) - 1:
                 return
             if choice == 0:
                 self.perform(self.create_website)
-            elif choice == len(rows) - 2:
+            elif choice == len(options) - 2:
                 self.perform(self.import_website)
             else:
                 self.website_actions(hosts[choice - 1])
+
+    def ssl_label(self, mode):
+        return {
+            "none": self.t("no_tls_http"),
+            "custom": self.t("custom_certificate"),
+            "letsencrypt": "Let’s Encrypt",
+        }.get(mode, mode)
 
     def site_summary(self, site):
         pairs = [
             ("domain", site["domain"]),
             ("php_version", site.get("php") or self.t("static_website")),
             ("document_root", site["root"]),
-            ("ssl_tls_mode", site["ssl"]),
+            ("ssl_tls_mode", self.ssl_label(site["ssl"])),
             ("linux_user", site["user"]),
             ("timezone", site.get("timezone", "UTC")),
             ("ui_aliases", ", ".join(site.get("aliases", [])) or "—"),
         ]
-        return "\n".join(f"{self.t(label)}: {value}" for label, value in pairs)
+        return table(
+            [self.t("field"), self.t("value")], [(self.t(k), v) for k, v in pairs]
+        )
 
     def create_website(self):
         host = core.domain(self.ask("domain"))
@@ -440,32 +494,27 @@ class UI:
     def website_actions(self, host):
         while host in self.sys.data()["sites"]:
             site = self.sys.data()["sites"][host]
-            rows = [
-                "ui_site_details",
-                "edit_website",
-                "configure_website_ssl",
-                "git_deployment",
-                "website_ssh_sftp_access",
-                "db_manage",
-                "delete_website",
-                "back",
+            entries = [
+                ("ui_site_details", lambda: self.show(self.site_summary(site), host)),
+                ("edit_website", lambda: self.edit_site(site)),
+                ("configure_website_ssl", lambda: self.configure_ssl(site)),
+                ("site_logs", lambda: self.site_logs(site)),
+                ("git_deployment", lambda: self.deploy_site(site)),
+                ("website_ssh_sftp_access", lambda: self.site_student_access(site)),
+                ("db_manage", lambda: self.database_site(site)),
+                ("delete_website", lambda: self.remove_site(site)),
             ]
-            choice = self.menu(host, rows)
-            if choice in (None, 7):
+            choice = self.menu(
+                host,
+                [k for k, _ in entries] + ["back"],
+                details={k: self.site_summary(site) for k, _ in entries},
+            )
+            if choice is None or choice == len(entries):
                 return
-            actions = [
-                lambda: self.show(self.site_summary(site), host),
-                lambda: self.edit_site(site),
-                lambda: self.configure_ssl(site),
-                lambda: self.deploy_site(site),
-                lambda: self.access_site(site),
-                lambda: self.database_site(site),
-                lambda: self.remove_site(site),
-            ]
-            if choice == 5:
-                actions[choice]()
+            if choice in (0, 3, 5, 6):
+                entries[choice][1]()
             else:
-                self.perform(actions[choice])
+                self.perform(entries[choice][1])
 
     def edit_site(self, site):
         choice = self.menu(
@@ -549,16 +598,18 @@ class UI:
             names = [r["database"] for r in rows]
             options = (
                 ["db_create"]
-                + [
-                    r["database"]
-                    + "  ·  "
-                    + (
-                        r["site"]
-                        or self.t("db_managed" if r["managed"] else "db_external")
-                    )
-                    + f'  ·  {r["bytes"]/1048576:.1f} MiB'
-                    for r in rows
-                ]
+                + aligned_rows(
+                    [
+                        (
+                            r["database"],
+                            r["site"]
+                            or self.t("db_managed" if r["managed"] else "db_external"),
+                            size(r["bytes"]),
+                        )
+                        for r in rows
+                    ],
+                    [38, 32, 12],
+                )
                 + ["back"]
             )
             choice = self.menu(label, options)
@@ -567,7 +618,7 @@ class UI:
             if choice == 0:
                 self.perform(lambda: self.create_database(engine))
             elif not rows[choice - 1]["managed"]:
-                self.show(self.t("db_external_hint"), "db_manage")
+                self.perform(lambda: self.database_external(engine, names[choice - 1]))
             else:
                 self.database_detail(engine, names[choice - 1])
 
@@ -579,27 +630,40 @@ class UI:
     def database_detail(self, engine, database):
         while database in engine.managed(self.sys):
             choice = self.menu(
-                database, ["db_tables", "db_users", "db_export", "db_delete", "back"]
+                database,
+                [
+                    "db_tables",
+                    "db_users",
+                    "db_export",
+                    "db_delete",
+                    "sql_terminal",
+                    "local_exports",
+                    "back",
+                ],
             )
-            if choice in (None, 4):
+            if choice in (None, 6):
                 return
+            if choice == 4:
+                self.perform(lambda: self.sql_terminal(engine, database))
+                continue
+            if choice == 5:
+                self.export_inventory()
+                continue
             if choice == 0:
                 self.perform(
                     lambda: self.show(
                         self.t("db_tables_hint")
                         + "\n\n"
-                        + (engine.tables(self.sys, database) or self.t("db_no_tables")),
+                        + self.database_table(
+                            engine, engine.tables(self.sys, database)
+                        ),
                         database,
                     )
                 )
             elif choice == 1:
                 self.database_users(engine, database)
             elif choice == 2:
-                self.perform(
-                    lambda: self.show(
-                        self.t("db_dump_saved", path=engine.dump(self.sys, database))
-                    )
-                )
+                self.perform(lambda: self.show(self.export_dump(engine, database)))
             else:
 
                 def remove():
@@ -608,7 +672,16 @@ class UI:
                     ):
                         self.show(
                             self.t(
-                                "db_dump_saved", path=engine.remove(self.sys, database)
+                                "db_dump_saved",
+                                path=(
+                                    engine.remove(
+                                        self.sys,
+                                        database,
+                                        force=self.yes("db_force_connections"),
+                                    )
+                                    if engine is postgresql
+                                    else engine.remove(self.sys, database)
+                                ),
                             )
                         )
 
@@ -634,13 +707,17 @@ class UI:
             accounts = engine.accounts(self.sys, database)
             rows = (
                 ["db_user_create", "db_user_existing"]
-                + [
-                    a["username"]
-                    + "  ·  "
-                    + self.t("db_role_" + a["role"])
-                    + ("  ·  " + self.t("db_primary") if a["primary"] else "")
-                    for a in accounts
-                ]
+                + aligned_rows(
+                    [
+                        (
+                            a["username"],
+                            self.t("db_role_" + a["role"]),
+                            self.t("db_primary") if a["primary"] else "",
+                        )
+                        for a in accounts
+                    ],
+                    [28, 24, 20],
+                )
                 + ["back"]
             )
             choice = self.menu(self.t("db_users_title", database=database), rows)
@@ -700,7 +777,10 @@ class UI:
         if self.confirm("db_reveal_warning"):
             # Deliberately bypass notify/activity: credentials stay out of logs.
             self.show(
-                json.dumps(engine.credentials(self.sys, database, username), indent=2),
+                table(
+                    [self.t("field"), self.t("value")],
+                    engine.credentials(self.sys, database, username).items(),
+                ),
                 "db_access",
             )
 
@@ -894,6 +974,10 @@ class UI:
         choice = self.menu(
             "ssl_tls_mode",
             ["no_tls_http", "Let’s Encrypt", "custom_certificate", "back"],
+            details={
+                key: self.site_summary(site)
+                for key in ("no_tls_http", "Let’s Encrypt", "custom_certificate")
+            },
         )
         if choice == 0 and self.confirm(
             self.t("switch_domain_to_http_without_tls", domain=site["domain"])
@@ -907,7 +991,16 @@ class UI:
             labels = sorted(self.sys.data()["certificates"])
             if not labels:
                 raise Error("import_a_custom_certificate_first")
-            i = self.menu("select_certificate", labels)
+            i = self.menu(
+                "select_certificate",
+                labels,
+                details={
+                    label: self.certificate_summary(
+                        label, self.sys.data()["certificates"][label]
+                    )
+                    for label in labels
+                },
+            )
             if i is not None and self.confirm(
                 self.t(
                     "confirm_assign_certificate",
@@ -924,9 +1017,10 @@ class UI:
             "ssl_certificates",
             [
                 ("certificate_inventory", lambda: self.ssl_action(0)),
-                ("import_replace_custom_certificate", lambda: self.ssl_action(1)),
+                ("certificate_add", lambda: self.ssl_action(1)),
                 ("configure_website_ssl", lambda: self.ssl_action(2)),
                 ("renew_let_s_encrypt_certificates", lambda: self.ssl_action(3)),
+                ("ssl_schedule", self.ssl_schedule),
             ],
         )
 
@@ -942,18 +1036,46 @@ class UI:
             ("cert_fingerprint", info.get("fingerprint", "—")),
             (
                 "cert_assigned_sites",
-                ", ".join(site["domain"] for site in sites) or self.t("cert_unused"),
+                ", ".join(site["domain"] for site in sites)
+                or (
+                    label.removeprefix("Let’s Encrypt: ")
+                    if label.startswith("Let’s Encrypt: ")
+                    else self.t("cert_unused")
+                ),
             ),
         ]
-        return "\n".join(f"{self.t(key)}: {value}" for key, value in fields)
+        if info.get("days_left") is not None:
+            days = info["days_left"]
+            fields.insert(
+                1,
+                (
+                    "cert_status",
+                    (
+                        self.t("cert_expired")
+                        if days < 0
+                        else self.t("cert_expires_days", days=days)
+                    ),
+                ),
+            )
+        return table(
+            [self.t("field"), self.t("value")], [(self.t(k), v) for k, v in fields]
+        )
 
     def certificate_inventory(self):
         while True:
             labels = sorted(self.sys.data()["certificates"])
+            letsencrypt = {
+                "Let’s Encrypt: " + path.name: path / "cert.pem"
+                for path in Path("/etc/letsencrypt/live").glob("*")
+                if (path / "cert.pem").is_file()
+            }
+            labels += sorted(letsencrypt)
             inventory = {}
             certificate_rows = []
             for label in labels:
-                cert_path = CONF / "certificates" / label / "cert.pem"
+                cert_path = letsencrypt.get(
+                    label, CONF / "certificates" / label / "cert.pem"
+                )
                 info = (
                     web.certificate_info(self.sys, cert_path)
                     if cert_path.exists()
@@ -971,9 +1093,21 @@ class UI:
                     )
                 )
                 certificate_rows.append(
-                    self.t("cert_inventory_row", name=label, expiry=expiry)
+                    (
+                        label,
+                        (
+                            "Let’s Encrypt"
+                            if label in letsencrypt
+                            else self.t("custom_certificate")
+                        ),
+                        expiry,
+                    )
                 )
-            rows = ["cert_domain_security"] + certificate_rows + ["back"]
+            rows = (
+                ["cert_domain_security"]
+                + aligned_rows(certificate_rows, [42, 20, 28])
+                + ["back"]
+            )
             choice = self.menu("certificate_inventory", rows)
             if choice is None or choice == len(rows) - 1:
                 return
@@ -983,7 +1117,14 @@ class UI:
                     for site in self.sys.data()["sites"].values()
                 ]
                 self.show(
-                    "\n".join(lines) or self.t("no_websites_yet"),
+                    (
+                        table(
+                            [self.t("domain"), "SSL/TLS", self.t("certificate_name")],
+                            [line.split("  |  ") for line in lines],
+                        )
+                        if lines
+                        else self.t("no_websites_yet")
+                    ),
                     "cert_domain_security",
                 )
                 continue
@@ -991,12 +1132,16 @@ class UI:
             info = inventory[label]
             days = info.get("days_left")
             summary = self.certificate_summary(label, info)
-            if days is not None and days <= 30:
-                summary = (
-                    self.t("certificate_expiry_warning", name=label, days=days)
-                    + "\n\n"
-                    + summary
+            if label in letsencrypt:
+                action = self.menu(
+                    label,
+                    ["cert_view_details", "renew_let_s_encrypt_certificates", "back"],
                 )
+                if action == 0:
+                    self.show(summary, label)
+                elif action == 1:
+                    self.ssl_action(3)
+                continue
             action = self.menu(
                 label,
                 ["cert_view_details", "cert_replace", "cert_assign", "back"],
@@ -1100,7 +1245,10 @@ class UI:
         if choice == 0:
             self.certificate_inventory()
         elif choice == 1:
-            self.certificate_import_form(core.name(self.ask("certificate_name")))
+            label = core.name(self.ask("certificate_name"))
+            if label in self.sys.data()["certificates"]:
+                raise Error("cert_exists_inventory")
+            self.certificate_import_form(label)
         elif choice == 2:
             self.configure_ssl()
         elif choice == 3 and self.confirm(
@@ -1125,7 +1273,8 @@ class UI:
                 ("configure_scheduled_scan", lambda: self.security_action(2)),
                 ("clamav_report", lambda: self.security_action(3)),
                 ("fail2ban_report", lambda: self.security_action(4)),
-                ("firewall_rules", lambda: self.security_action(5)),
+                ("firewall_rules", self.firewall_menu),
+                ("fail2ban_settings", self.fail2ban_menu),
             ],
         )
 
@@ -1229,26 +1378,49 @@ class UI:
             else:
                 self.show(json.dumps(ops.metrics(), indent=2))
         elif choice == 1:
-            rows = json.loads(self.sys.read(STATE / "metrics.json", "[]"))
-            self.show(
-                "\n".join(
-                    f'{r["time"][:16]} UTC | CPU {bar(r["cpu"], 10)} RAM {100*r["ram_used"]/r["ram_total"]:5.1f}% DISK {100*r["disk_used"]/r["disk_total"]:5.1f}%'
-                    for r in rows
+            records = json.loads(self.sys.read(STATE / "metrics.json", "[]"))
+            if not records:
+                return self.show(self.t("no_metrics_yet"))
+            values = [
+                (
+                    r["time"][:16] + " UTC",
+                    bar(r["cpu"], 10),
+                    bar(100 * r["ram_used"] / max(1, r["ram_total"]), 10),
+                    bar(100 * r["disk_used"] / max(1, r["disk_total"]), 10),
                 )
-                or self.t("metrics_no_samples")
+                for r in records
+            ]
+            self.show(
+                table([self.t("time"), "CPU", "RAM", self.t("dashboard_disk")], values),
+                "hourly_timeline_7_days",
             )
         elif choice == 2:
+            output = self.sys.run(
+                [
+                    "systemctl",
+                    "list-units",
+                    "--type=service",
+                    "--state=running",
+                    "--no-legend",
+                    "--plain",
+                    "--no-pager",
+                ],
+                check=False,
+                timeout=5,
+            )
+            values = [
+                line.split(None, 4) for line in output.splitlines() if line.strip()
+            ]
             self.show(
-                self.sys.run(
+                table(
+                    [self.t("service"), self.t("status"), self.t("description")],
                     [
-                        "systemctl",
-                        "list-units",
-                        "--type=service",
-                        "--state=running",
-                        "--no-pager",
+                        (r[0], r[3], r[4] if len(r) > 4 else "")
+                        for r in values
+                        if len(r) >= 4
                     ],
-                    check=False,
-                )
+                ),
+                "active_services",
             )
         elif choice in (3, 4, 5):
             if choice == 3:
@@ -1268,7 +1440,7 @@ class UI:
         while True:
             profiles = backups.profiles(self.sys)
             rows = (
-                ["backup_add"]
+                ["backup_add", "manual_archive", "local_exports"]
                 + [
                     self.t(p["label"])
                     + "  ·  "
@@ -1289,10 +1461,14 @@ class UI:
                 return
             if choice == 0:
                 self.perform(self.backup_wizard, backup=True)
+            elif choice == 1:
+                self.perform(self.manual_archive, backup=True)
+            elif choice == 2:
+                self.export_inventory()
             elif choice == len(rows) - 2:
                 self.show(self.t("backup_guide_text"), "backup_guide")
             else:
-                self.backup_profile(profiles[choice - 1]["id"])
+                self.backup_profile(profiles[choice - 3]["id"])
 
     def backup_dependencies(self):
         missing = [p for p in ("restic", "rclone") if not core.installed(self.sys, p)]
@@ -1690,10 +1866,13 @@ class UI:
         row = rows[choice]
         action = self.menu(
             "backup_copy_actions",
-            ["backup_copy_details", "backup_restore_copy", "back"],
+            ["backup_copy_details", "backup_restore_copy", "snapshot_delete", "back"],
         )
         if action == 0:
-            self.show(json.dumps(row, indent=2), "backup_copy_details")
+            self.show(
+                table([self.t("field"), self.t("value")], row.items()),
+                "backup_copy_details",
+            )
         elif action == 1:
             target = self.ask(
                 "backup_restore_directory", "/srv/mos-restore-" + row["id"][:8]
@@ -1713,6 +1892,12 @@ class UI:
                 self.show(
                     self.t("backup_restore_done", target=target), "backup_restore_copy"
                 )
+
+        elif action == 2 and self.confirm("snapshot_delete_warning", row["id"][:8]):
+            self.show(
+                backups.operate(self.sys, profile["id"], "forget", snapshot=row["id"]),
+                "snapshot_delete",
+            )
 
     def backup_schedule(self, profile):
         kinds = ["daily", "weekly", "hours", "off"]
@@ -1849,31 +2034,42 @@ class UI:
             if choice is None or choice == len(entries):
                 return
             action = entries[choice][1]
-            if action in (self.ssh, self.security, self.ssl, self.live_dashboard):
-                action()
+            if action in (
+                self.ssh,
+                self.security,
+                self.ssl,
+                self.live_dashboard,
+                self.advanced_settings,
+                self.php_settings,
+                self.restore_points,
+                self.firewall_menu,
+                self.fail2ban_menu,
+                self.app_update,
+            ):
+                result = action()
             else:
-                self.perform(action, allow_pending=title == "ssh_configuration")
+                result = self.perform(
+                    action, allow_pending=title == "ssh_configuration"
+                )
+
+            if result is True and action in (
+                self.uninstall,
+                self.advanced_settings,
+                self.app_update,
+            ):
+                return True
 
     def software(self):
-        self.section(
+        return self.section(
             "ui_software",
             [
-                ("install_web_server", self.install_web),
-                ("manage_package_selection", self.package_selection),
+                ("app_update", self.app_update),
                 ("ui_package_updates", self.package_updates),
-                (
-                    "all_installed_debian_packages",
-                    lambda: self.show(
-                        self.sys.run(
-                            [
-                                "dpkg-query",
-                                "-W",
-                                "-f=${binary:Package}\t${Version}\t${Status}\n",
-                            ]
-                        )
-                    ),
-                ),
-                ("refresh_apt_indexes", lambda: core.refresh(self.sys)),
+                ("manage_package_selection", self.package_selection),
+                ("install_web_server", self.install_web),
+                ("all_installed_debian_packages", self.installed_inventory),
+                ("apt_sources", self.apt_sources),
+                ("php_settings", self.php_settings),
             ],
         )
 
@@ -1886,7 +2082,7 @@ class UI:
             core.apply_packages(self.sys, args)
             self.show(core.health_report(self.sys), "ui_health_checks")
         elif not args:
-            self.notify("ui_no_updates")
+            self.show(self.t("ui_no_updates"), "ui_package_updates")
 
     def administrator_password(self):
         password = self.ask("users_password", secret=True)
@@ -1939,78 +2135,89 @@ class UI:
 
     def admin_users(self):
         while True:
-            accounts = users.administrators(self.sys)
+            accounts = users.inventory(self.sys)
+            labels = aligned_rows(
+                [
+                    (
+                        a["username"],
+                        self.t("account_" + a["kind"]),
+                        a["workspace"] or a["home"],
+                    )
+                    for a in accounts
+                ],
+                [24, 20, 44],
+            )
             choice = self.menu(
                 "admin_users",
-                ["users_create"] + [a["username"] for a in accounts] + ["back"],
+                ["users_create", "student_create"] + labels + ["back"],
+                details={label: self.t("users_ssh_settings_hint") for label in labels},
             )
-            if choice is None or choice == len(accounts) + 1:
+            if choice is None or choice == len(accounts) + 2:
                 return
             if choice == 0:
                 self.perform(self.create_administrator)
+            elif choice == 1:
+                self.perform(self.create_student)
             else:
-                self.perform(lambda: self.administrator_actions(accounts[choice - 1]))
+                self.ssh_account_actions(accounts[choice - 2])
 
     def security_center(self):
         self.section(
             "ui_security_access",
             [
-                ("ssh_configuration", self.ssh),
                 ("manage_security", self.security),
                 ("ssl_certificates", self.ssl),
             ],
         )
 
     def settings(self):
-        while True:
-            choice = self.menu(
-                "ui_settings",
-                [
-                    "automatic_configuration",
-                    "language",
-                    "operation_history",
-                    "ui_session_log",
-                    "ui_restore_points",
-                    "uninstall_mos_itc",
-                    "back",
-                ],
-            )
-            if choice in (None, 6):
-                return
-            if choice == 0:
-                self.perform(self.configure)
-            elif choice == 1:
-                self.perform(self.change_language)
-            elif choice == 2:
-                self.show(
-                    self.sys.read(
-                        STATE / "operations.jsonl", self.t("no_operations_yet")
-                    )[-16000:],
-                    "operation_history",
-                )
-            elif choice == 3:
-                self.show("\n".join(self.activity), "ui_session_log")
-            elif choice == 4:
-                self.restore_points()
-            elif choice == 5 and self.perform(self.uninstall):
-                return True
+        return self.section(
+            "ui_settings",
+            [
+                ("automatic_configuration", self.configure),
+                ("system_settings", self.system_settings),
+                ("ssh_configuration", self.ssh),
+                ("php_settings", self.php_settings),
+                ("download_settings", self.download_settings),
+                ("language", self.change_language),
+                ("advanced_settings", self.advanced_settings),
+            ],
+        )
 
     def restore_points(self):
-        points = recovery.list_points()
-        if not points:
-            self.show(self.t("ui_no_restore_points"))
-            return
-        choice = self.menu("ui_restore_points", [p["name"] for p in points] + ["back"])
-        if choice is None or choice == len(points):
-            return
-        point = points[choice]["name"]
-        target = self.ask(
-            "restore_directory_must_not_exist", "/srv/mos-recovery-" + point
-        )
-        if self.confirm(self.t("ui_extract_restore_point", name=point, target=target)):
-            self.perform(
-                lambda: self.notify(str(recovery.extract_point(point, target)))
+        while True:
+            points = recovery.list_points()
+            if not points:
+                return self.show(self.t("ui_no_restore_points"))
+            labels = aligned_rows(
+                [(p["name"], size(p.get("bytes", 0))) for p in points]
             )
+            index = self.menu(
+                "ui_restore_points",
+                labels + ["back"],
+                details={r: self.t("restore_points_help") for r in labels},
+            )
+            if index is None or index == len(points):
+                return
+            point = points[index]["name"]
+            action = self.menu(
+                point, ["restore_contents", "restore_extract", "delete", "back"]
+            )
+            if action == 0:
+                self.show(recovery.contents(point), "restore_contents")
+            elif action == 1:
+                target = self.ask(
+                    "restore_directory_must_not_exist",
+                    "/srv/mos-recovery-" + point.replace(":", "-"),
+                )
+                if self.confirm(
+                    self.t("ui_extract_restore_point", name=point, target=target)
+                ):
+                    self.perform(
+                        lambda: self.notify(str(recovery.extract_point(point, target)))
+                    )
+            elif action == 2 and self.confirm("delete_restore_point", point):
+                self.perform(lambda: recovery.remove(point))
 
     def change_language(self):
         language = self.menu("language", ["English", "Español latinoamericano"])
@@ -2031,18 +2238,799 @@ class UI:
         self.show(text, "about", artwork=True)
 
     def overview(self):
+        from .terminal import dashboard_lines
+
         data = self.sys.data()
-        text = self.t(
-            "ui_overview_text",
-            websites=len(data["sites"]),
-            certificates=len(data["certificates"]),
-            hostname=data.get("hostname", os.uname().nodename),
-            timezone=data.get("timezone", "UTC"),
+        sample = ops.metrics()
+        info = self.context.get("network") or network.inventory()
+        public = (
+            self.context.get("public")
+            or network.public(data.get("public_ip", ""))
+            or info.get("public")
+            or network.ec2_public()
         )
-        self.show(text, "ui_overview")
+        self.context.update(network=info, public=public)
+        summary = []
+        for line in dashboard_lines(sample, None, [sample["cpu"]], [], [], self.t):
+            if line.startswith(self.t("dashboard_cpu_history")):
+                break
+            summary.append(line)
+        body = "\n".join(summary)
+        addresses = [
+            (
+                a["interface"],
+                f"{a['address']}/{a['prefix']}",
+                self.t("public_address" if a["public"] else "private_ip"),
+            )
+            for a in info["addresses"]
+        ]
+        address_table = table(
+            [self.t("interface"), self.t("address"), self.t("type")], addresses
+        )
+        body += "\n\n" + table(
+            [self.t("field"), self.t("value")],
+            [
+                (
+                    self.t("operating_system"),
+                    core.os_info().get("PRETTY_NAME", "Linux"),
+                ),
+                (
+                    self.t("public_address"),
+                    self.context.get("public") or self.t("not_detected"),
+                ),
+                (
+                    self.t("gateway"),
+                    ", ".join(
+                        r["gateway"] + " (" + r["interface"] + ")"
+                        for r in info["routes"]
+                    )
+                    or "—",
+                ),
+                (self.t("timezone"), data.get("timezone", "UTC")),
+                (self.t("websites"), len(data["sites"])),
+                (self.t("certificate_inventory"), len(data["certificates"])),
+            ],
+        )
+        body += "\n\n" + address_table
+        self.show(body, "ui_overview")
 
     def main(self):
         return self.session(self.main_loop)
+
+    def load_context(self):
+        try:
+            info = network.inventory()
+            self.context.update(
+                network=info,
+                public=network.public(self.sys.data().get("public_ip", ""))
+                or info["public"]
+                or network.ec2_public(),
+            )
+            self.context["update"] = updates.latest()
+        except (OSError, ValueError, KeyError):
+            pass
+
+    def outside(self, command, env=None):
+        if self.sys.dry:
+            return self.notify(" ".join(map(str, command)))
+        if self.terminal:
+            curses.def_prog_mode()
+            if not curses.isendwin():
+                curses.endwin()
+        try:
+            return subprocess.run(
+                [str(x) for x in command], env=env or core.SAFE_ENV
+            ).returncode
+        finally:
+            if self.terminal:
+                curses.reset_prog_mode()
+                curses.curs_set(0)
+                self.terminal.win.clearok(True)
+                self.terminal.win.refresh()
+
+    def site_logs(self, site):
+        mode = self.menu("site_logs", ["logs_recent", "logs_follow", "back"])
+        if mode in (None, 2):
+            return
+        kind = self.menu("site_logs", ["logs_access", "logs_errors", "back"])
+        if kind in (None, 2):
+            return
+        path = Path("/var/log/apache2") / (
+            "mos-"
+            + core.domain(site["domain"])
+            + ("-access.log" if kind == 0 else "-error.log")
+        )
+        if not path.exists():
+            return self.show(self.t("logs_not_yet"))
+        if mode == 0:
+            self.show(self.sys.run(["tail", "-n", "200", "--", path]), "site_logs")
+        else:
+            self.show(self.t("logs_follow_help"), "site_logs")
+            self.outside(["tail", "-n", "50", "-F", "--", path])
+
+    def database_table(self, engine, output):
+        values = [r.split("\t") for r in output.splitlines() if r]
+        count = 4 if engine is databases else 3
+        for r in values:
+            if len(r) == count:
+                try:
+                    r[-1] = size(r[-1])
+                except ValueError:
+                    pass
+        headers = (
+            [self.t("db_tables")]
+            + (["Engine"] if count == 4 else [])
+            + [self.t("estimated_rows"), self.t("size")]
+        )
+        return (
+            table(headers, [r for r in values if len(r) == count])
+            if values
+            else self.t("db_no_tables")
+        )
+
+    def database_external(self, engine, database):
+        choice = self.menu(
+            database,
+            ["db_introspect", "sql_terminal", "back"],
+            details={
+                "db_introspect": self.t("db_introspect_help"),
+                "sql_terminal": self.t("sql_help"),
+            },
+        )
+        if choice == 0:
+            tables, grants = engine.inspect(self.sys, database)
+            self.show(
+                self.database_table(engine, tables)
+                + "\n\n"
+                + table(
+                    [self.t("linux_user"), self.t("db_permissions")],
+                    [
+                        line.split("\t")
+                        for line in grants.splitlines()
+                        if len(line.split("\t")) == 2
+                    ],
+                ),
+                database,
+            )
+        elif choice == 1:
+            self.sql_terminal(engine, database)
+
+    def sql_terminal(self, engine, database):
+        self.show(self.t("sql_help"), "sql_terminal")
+        while True:
+            query = self.editor("sql_terminal", "SELECT 1;\n")
+            if not query.strip():
+                return
+            if not self.confirm("sql_execute", details=query):
+                return
+            try:
+                result = engine.console(self.sys, database, query)
+            except Error as exc:
+                self.show(str(exc), "sql_terminal")
+            else:
+                self.show(result or self.t("sql_done"), "sql_terminal")
+            if not self.yes("sql_another"):
+                return
+
+    def export_dump(self, engine, database):
+        path = engine.dump(self.sys, database)
+        if self.yes("download_create_link"):
+            self.download_link(transfers.register(self.sys, path))
+        return self.t("db_dump_saved", path=path)
+
+    def export_inventory(self):
+        while True:
+            transfers.cleanup(self.sys)
+            items = transfers.records(self.sys)
+            dumps = sorted((STATE / "database-dumps").glob("*.sql"))
+            entries = [
+                ("download", key, item["name"], item["size"])
+                for key, item in items.items()
+            ]
+            entries += [
+                ("dump", str(path), path.name, path.stat().st_size)
+                for path in dumps
+                if path.is_file() and not path.is_symlink()
+            ]
+            if not entries:
+                return self.show(self.t("no_exports"), "local_exports")
+            labels = aligned_rows([(r[2], size(r[3])) for r in entries], [56, 12])
+            details = {
+                label: table(
+                    [self.t("field"), self.t("value")],
+                    [
+                        (self.t("file"), entry[2]),
+                        (self.t("size"), size(entry[3])),
+                        (
+                            self.t("download_expires"),
+                            (
+                                dt.datetime.fromtimestamp(items[entry[1]]["expires"])
+                                .astimezone()
+                                .isoformat(timespec="seconds")
+                                if entry[0] == "download"
+                                else self.t("export_retained")
+                            ),
+                        ),
+                    ],
+                )
+                for label, entry in zip(labels, entries)
+            }
+            choice = self.menu("local_exports", labels + ["back"], details=details)
+            if choice is None or choice == len(entries):
+                return
+            kind, key, filename, _ = entries[choice]
+            action = self.menu(filename, ["download_create_link", "delete", "back"])
+            if action == 0:
+                identifier = (
+                    key if kind == "download" else transfers.register(self.sys, key)
+                )
+                self.perform(lambda: self.download_link(identifier))
+            elif action == 1 and self.confirm("delete_export", filename):
+                self.perform(
+                    lambda: (
+                        transfers.remove(self.sys, key)
+                        if kind == "download"
+                        else self.delete_export_source(key)
+                    )
+                )
+
+    def delete_export_source(self, path):
+        for identifier, item in transfers.records(self.sys).items():
+            if item.get("source") == path:
+                transfers.remove(self.sys, identifier)
+        self.sys.delete(path)
+
+    def download_link(self, identifier):
+        sites = [
+            site
+            for site in self.sys.data()["sites"].values()
+            if site["ssl"] in ("custom", "letsencrypt")
+        ]
+        options = [s["domain"] + " (HTTPS)" for s in sites] + ["download_http", "back"]
+        choice = self.menu("download_transport", options)
+        if choice is None or choice == len(options) - 1:
+            return
+        site = sites[choice] if choice < len(sites) else None
+        if site is None and not self.confirm("download_http_warning"):
+            return
+        server, url = transfers.publish(self.sys, identifier, site)
+        self.show(
+            self.t(
+                "download_link_ready",
+                url=url,
+                port=(
+                    (443 if server["tls"] else 80)
+                    if server.get("proxy")
+                    else server["port"]
+                ),
+                minutes=self.sys.data().get("download_minutes", 60),
+            ),
+            "download_create_link",
+        )
+
+    def manual_archive(self):
+        paths, sql = self.backup_sources()
+        kind = self.menu("manual_archive", ["ZIP", "tar.gz", "back"])
+        if kind in (None, 2):
+            return
+        if self.confirm("archive_confirm", details="\n".join(paths)):
+            identifier = transfers.archive(
+                self.sys, paths, ["zip", "tar.gz"][kind], sql
+            )
+            self.download_link(identifier)
+
+    def system_settings(self):
+        current = self.sys.data()
+        host = self.ask("hostname", current.get("hostname", os.uname().nodename))
+        zone = ops.timezone(self.ask("timezone", current.get("timezone", "UTC")))
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host):
+            raise Error("settings_invalid")
+        if not self.confirm(
+            "system_settings_warning",
+            details=table(
+                [self.t("field"), self.t("value")],
+                [(self.t("hostname"), host), (self.t("timezone"), zone)],
+            ),
+        ):
+            return
+        was_applied = ops.profile_applied(self.sys)
+        old_host = os.uname().nodename
+        old_zone = self.sys.run(
+            ["timedatectl", "show", "--property=Timezone", "--value"]
+        ).strip()
+        hosts = self.sys.read("/etc/hosts")
+        line = "127.0.1.1\t" + host
+        hosts = (
+            re.sub(r"^127\.0\.1\.1\s+.*$", line, hosts, flags=re.M)
+            if re.search(r"^127\.0\.1\.1\s", hosts, re.M)
+            else hosts.rstrip() + "\n" + line + "\n"
+        )
+        try:
+            with self.sys.transaction(["/etc/hosts", STATE / "state.json"]):
+                self.sys.write("/etc/hosts", hosts, 0o644)
+                self.sys.run(["hostnamectl", "set-hostname", host], mutate=True)
+                self.sys.run(["timedatectl", "set-timezone", zone], mutate=True)
+                current.update(
+                    hostname=host,
+                    timezone=zone,
+                    automatic_configuration_applied=was_applied,
+                )
+                self.sys.save(current)
+        except BaseException:
+            self.sys.run(
+                ["hostnamectl", "set-hostname", old_host], mutate=True, check=False
+            )
+            if old_zone:
+                self.sys.run(
+                    ["timedatectl", "set-timezone", old_zone], mutate=True, check=False
+                )
+            raise
+        self.show(self.t("settings_saved"))
+
+    def download_settings(self):
+        minutes = int(
+            self.ask(
+                "download_minutes", str(self.sys.data().get("download_minutes", 60))
+            )
+        )
+        if not 1 <= minutes <= 1440:
+            raise Error("settings_invalid")
+        address = self.ask(
+            "public_ip",
+            self.sys.data().get("public_ip", self.context.get("public", "")),
+        )
+        if address and not network.public(address):
+            raise Error("settings_invalid")
+        if self.confirm("save_settings"):
+            data = self.sys.data()
+            data.update(download_minutes=minutes, public_ip=address)
+            self.sys.save(data)
+            self.context["public"] = address
+
+    def installed_inventory(self):
+        output = self.sys.run(
+            [
+                "dpkg-query",
+                "-W",
+                "-f=${binary:Package}\t${Version}\t${db:Status-Status}\n",
+            ]
+        )
+        self.show(
+            table(
+                [self.t("package"), self.t("version"), self.t("status")],
+                [
+                    line.split("\t")
+                    for line in output.splitlines()
+                    if len(line.split("\t")) == 3
+                ],
+            ),
+            "all_installed_debian_packages",
+        )
+
+    def apt_sources(self):
+        paths = (
+            [Path("/etc/apt/sources.list")]
+            + sorted(Path("/etc/apt/sources.list.d").glob("*.list"))
+            + sorted(Path("/etc/apt/sources.list.d").glob("*.sources"))
+        )
+        index = self.menu("apt_sources", [str(p) for p in paths] + ["back"])
+        if index is None or index == len(paths):
+            return
+        path = paths[index]
+        content = self.editor("apt_sources", self.sys.read(path))
+        if self.confirm("apt_sources_warning", details=content):
+            with self.sys.transaction([path]):
+                self.sys.write(path, content, 0o644)
+                core.repository_check(self.sys)
+                core.refresh(self.sys)
+            self.show(self.t("settings_saved"))
+
+    def app_update(self):
+        if self.sys.exists(STATE / "ssh-pending.json"):
+            raise Error("confirm_or_roll_back_the_pending_ssh_change_first")
+        try:
+            new = updates.latest()
+        except (OSError, ValueError):
+            return self.show(self.t("app_update_failed"))
+        self.context["update"] = new
+        if not new:
+            return self.show(self.t("app_up_to_date"))
+        if not self.confirm(
+            "app_update_confirm", details=core.VERSION + " → " + new["tag"]
+        ):
+            return
+        with tempfile.TemporaryDirectory(prefix="mos-upgrade-") as tmp:
+            path = Path(tmp) / "install.sh"
+            url = f"https://raw.githubusercontent.com/{updates.REPOSITORY}/{new['sha']}/install.sh"
+            self.sys.run(
+                [
+                    "curl",
+                    "--fail",
+                    "--location",
+                    "--proto",
+                    "=https",
+                    "--proto-redir",
+                    "=https",
+                    url,
+                    "-o",
+                    path,
+                ],
+                timeout=60,
+            )
+            result = self.outside(
+                [
+                    "bash",
+                    path,
+                    "--repo",
+                    updates.REPOSITORY,
+                    "--ref",
+                    new["sha"],
+                    "--upgrade",
+                    "--app-update",
+                ]
+            )
+        if result != 0:
+            return self.show(self.t("app_update_failed"))
+        installed = self.sys.run(["/usr/local/bin/mos-itc", "--version"]).strip()
+        if installed == new["tag"].lstrip("v"):
+            self.restart = True
+            return True
+        self.show(self.t("app_update_failed"))
+
+    def php_settings(self):
+        versions = core.php_versions(self.sys, True)
+        i = self.menu("php_settings", versions + ["back"])
+        if i is None or i == len(versions):
+            return
+        version = versions[i]
+        i = self.menu("php_settings", ["PHP-FPM", "PHP CLI", "back"])
+        if i in (None, 2):
+            return
+        sapi = ("fpm", "cli")[i]
+        values = settings.php_values(self.sys, version, sapi)
+        while True:
+            keys = list(values)
+            i = self.menu(
+                "php_settings",
+                aligned_rows([(k, values[k]) for k in keys])
+                + ["save_settings", "php_advanced", "back"],
+            )
+            if i is None or i == len(keys) + 2:
+                return
+            if i < len(keys):
+                values[keys[i]] = self.ask(keys[i], values[keys[i]])
+            elif i == len(keys):
+                if self.confirm("php_warning"):
+                    self.perform(
+                        lambda: settings.php_save(self.sys, version, sapi, values)
+                    )
+            else:
+                which = self.menu(
+                    "php_advanced", ["php.ini", "99-mos-production.ini", "back"]
+                )
+                if which in (None, 2):
+                    continue
+                path = settings.php_path(self.sys, version, sapi)
+                if which == 0:
+                    path = path.parent.parent / "php.ini"
+                content = self.editor("php_advanced", self.sys.read(path))
+                if self.confirm("php_warning"):
+                    self.perform(
+                        lambda: settings.php_write(
+                            self.sys, version, sapi, content, main=which == 0
+                        )
+                    )
+                values = settings.php_values(self.sys, version, sapi)
+
+    def ssl_schedule(self):
+        self.show(self.t("ssl_schedule_help"), "ssl_schedule")
+        value = self.ask(
+            "time_hh_mm_server_timezone", self.sys.data().get("renewal_time", "03:00")
+        )
+        if self.confirm("save_settings"):
+            settings.renewal(self.sys, value)
+
+    def firewall_menu(self):
+        while True:
+            output = self.sys.run(["ufw", "status", "numbered"], check=False)
+            choice = self.menu(
+                "firewall_rules",
+                ["firewall_view", "firewall_add", "firewall_delete", "back"],
+                details={
+                    k: output
+                    for k in ("firewall_view", "firewall_add", "firewall_delete")
+                },
+            )
+            if choice in (None, 3):
+                return
+            if choice == 0:
+                self.show(output, "firewall_rules")
+            elif choice == 1:
+                action = self.menu("firewall_add", ["allow", "deny", "limit", "back"])
+                if action in (None, 3):
+                    continue
+                port = self.ask("port")
+                proto = self.menu("protocol", ["TCP", "UDP", "back"])
+                if proto in (None, 2):
+                    continue
+                source = self.ask("source_network", "any")
+                if self.confirm(
+                    "firewall_confirm",
+                    details=f"{['allow','deny','limit'][action]} {source} → {port}/{['tcp','udp'][proto]}",
+                ):
+                    self.perform(
+                        lambda: settings.firewall(
+                            self.sys,
+                            ["allow", "deny", "limit"][action],
+                            port,
+                            ["tcp", "udp"][proto],
+                            source,
+                        )
+                    )
+            else:
+                number = int(self.ask("firewall_rule_number"))
+                self.show(self.t("firewall_ssh_protection"))
+                line = next(
+                    (
+                        line
+                        for line in output.splitlines()
+                        if re.match(r"^\[\s*" + str(number) + r"\]", line)
+                    ),
+                    None,
+                )
+                if not line:
+                    raise Error("settings_invalid")
+                # Ambiguous app profiles and ranges may cover SSH: refuse those.
+                target = re.sub(r"^\[\s*\d+\]\s*", "", line).split()[0]
+                if not re.fullmatch(r"\d+(?:/(?:tcp|udp))?", target) or target.split(
+                    "/"
+                )[0] in ops.ssh_ports(self.sys):
+                    raise Error("firewall_ssh_protected")
+                if self.confirm("firewall_confirm", details=line):
+                    self.perform(
+                        lambda: self.sys.run(
+                            ["ufw", "--force", "delete", str(number)], mutate=True
+                        )
+                    )
+
+    def fail2ban_menu(self):
+        choice = self.menu(
+            "fail2ban_settings",
+            ["fail2ban_report", "fail2ban_edit", "fail2ban_advanced", "back"],
+        )
+        if choice in (None, 3):
+            return
+        if choice == 0:
+            return self.show(self.sys.run(["fail2ban-client", "status"], check=False))
+        if choice == 1:
+            jail = self.ask("fail2ban_jail", "sshd")
+            retry = int(self.ask("fail2ban_retries", "5"))
+            find = self.ask("fail2ban_findtime", "10m")
+            ban = self.ask("fail2ban_bantime", "1h")
+            enabled = self.yes("fail2ban_enabled")
+            if self.confirm("save_settings"):
+                self.perform(
+                    lambda: settings.fail2ban(self.sys, jail, retry, find, ban, enabled)
+                )
+        else:
+            path = Path("/etc/fail2ban/jail.d/90-mos-custom.local")
+            content = self.editor(
+                "fail2ban_advanced", self.sys.read(path, "# MOS custom jails\n")
+            )
+            if self.confirm("save_settings"):
+
+                def apply():
+                    with self.sys.transaction([path], [["fail2ban-client", "-t"]]):
+                        self.sys.write(path, content, 0o644)
+                    self.sys.run(["systemctl", "restart", "fail2ban"], mutate=True)
+
+                self.perform(apply)
+
+    def advanced_settings(self):
+        return self.section(
+            "advanced_settings",
+            [
+                ("ui_restore_points", self.restore_points),
+                ("apt_sources", self.apt_sources),
+                (
+                    "operation_history",
+                    lambda: self.show(
+                        self.sys.read(
+                            STATE / "operations.jsonl", self.t("no_operations_yet")
+                        )[-16000:]
+                    ),
+                ),
+                ("ui_session_log", lambda: self.show("\n".join(self.activity))),
+                ("uninstall_mos_itc", self.uninstall),
+                ("rick", self.rick),
+            ],
+        )
+
+    def rick(self):
+        # Display the response as terminal art. Never execute downloaded content.
+        self.outside(
+            [
+                "curl",
+                "--no-progress-meter",
+                "--max-time",
+                "90",
+                "https://ascii.live/rick",
+            ]
+        )
+
+    def student_dependencies(self):
+        required = ["acl", "sudo", "openssh-server"]
+        packages = [p for p in required if not core.installed(self.sys, p)]
+        if packages:
+            core.refresh(self.sys)
+            args, plan = core.apt_plan(self.sys, packages)
+            if not self.confirm("student_dependencies", details=plan):
+                raise Cancelled
+            core.apply_packages(self.sys, args)
+
+    def create_student(self, site=None):
+        self.show(self.t("student_help"), "student_create")
+        username = core.name(self.ask("linux_user"))
+        workspace = None
+        if site:
+            workspace = SITES / site["domain"]
+        else:
+            sites = list(self.sys.data()["sites"].values())
+            choice = self.menu(
+                "student_workspace",
+                ["student_personal"] + [s["domain"] for s in sites] + ["back"],
+            )
+            if choice is None or choice == len(sites) + 1:
+                return
+            if choice:
+                workspace = SITES / sites[choice - 1]["domain"]
+        allowed = users.password_login_allowed(self.sys)
+        password = (
+            self.administrator_password()
+            if allowed and self.yes("users_set_password")
+            else ""
+        )
+        key = (
+            self.ask("public_key") if not password or self.yes("users_add_key") else ""
+        )
+        if self.confirm(
+            "student_confirm",
+            details=username + " → " + str(workspace or Path("/home") / username),
+        ):
+            self.student_dependencies()
+            users.create_student(self.sys, username, password, workspace, key)
+            self.show(self.t("student_created", username=username), "student_create")
+
+    def site_student_access(self, site):
+        action = self.menu(
+            "website_ssh_sftp_access",
+            ["student_create", "student_site_owner", "admin_users", "back"],
+            details={
+                "student_create": self.t("student_help"),
+                "student_site_owner": self.t("student_owner_help"),
+                "admin_users": self.t("users_ssh_settings_hint"),
+            },
+        )
+        if action == 0:
+            self.perform(lambda: self.create_student(site))
+        elif action == 1:
+            from . import workspaces
+
+            keys = users.public_keys(self.sys, site["user"])
+            for key in keys:
+                ops.key_text(key)
+            if self.confirm(
+                "student_confirm",
+                details=site["user"] + " → " + str(SITES / site["domain"]),
+            ):
+
+                def activate():
+                    self.student_dependencies()
+                    workspaces.assign(self.sys, site["user"], SITES / site["domain"])
+                    for key in keys:
+                        users.add_public_key(self.sys, site["user"], key)
+
+                self.perform(activate)
+        elif action == 2:
+            self.admin_users()
+
+    def reassign_student(self, account):
+        from . import workspaces
+
+        sites = list(self.sys.data()["sites"].values())
+        choice = self.menu(
+            "student_workspace",
+            ["student_existing_home"] + [site["domain"] for site in sites] + ["back"],
+        )
+        if choice is None or choice == len(sites) + 1:
+            return
+        workspace = (
+            Path(account["home"])
+            if choice == 0
+            else SITES / sites[choice - 1]["domain"]
+        )
+        keys = users.public_keys(self.sys, account["username"])
+        for key in keys:
+            ops.key_text(key)
+        if self.confirm(
+            "student_reassign_warning",
+            details=account["username"] + " → " + str(workspace),
+        ):
+
+            def assign():
+                self.student_dependencies()
+                workspaces.assign(self.sys, account["username"], workspace)
+                for key in keys:
+                    users.add_public_key(self.sys, account["username"], key)
+
+            self.perform(assign)
+
+    def ssh_account_actions(self, account):
+        username = account["username"]
+        while True:
+            student = self.sys.data().get("student_accounts", {}).get(username)
+            options = ["users_keys", "add_public_ssh_key", "users_change_password"]
+            if student is not None:
+                options += [
+                    "users_suspend" if student.get("enabled", True) else "users_enable",
+                    "student_workspace",
+                ]
+            elif account["kind"] in ("user", "site"):
+                options.append("users_assign_workspace")
+            choice = self.menu(
+                username,
+                options + ["back"],
+                details={"users_keys": self.t("users_ssh_settings_hint")},
+            )
+            if choice is None or choice == len(options):
+                return
+            if choice >= 3:
+                if options[choice] in ("student_workspace", "users_assign_workspace"):
+                    self.reassign_student(account)
+                elif self.confirm("users_toggle_warning", username):
+                    self.perform(
+                        lambda: users.student_enabled(
+                            self.sys, username, not student.get("enabled", True)
+                        )
+                    )
+                continue
+            if choice == 0:
+                keys = users.public_keys(self.sys, username)
+                labels = [
+                    f"{i+1}. {key.split()[0]} … {key.split()[-1]}"
+                    for i, key in enumerate(keys)
+                ]
+                index = self.menu("users_keys", labels + ["back"])
+                if index is not None and index < len(keys):
+                    action = self.menu(
+                        "users_keys", ["cert_view_details", "delete", "back"]
+                    )
+                    if action == 0:
+                        self.show(keys[index], "users_keys")
+                    elif action == 1 and self.confirm(
+                        "users_delete_key", details=keys[index]
+                    ):
+                        if len(keys) == 1 and not users.password_login_allowed(
+                            self.sys
+                        ):
+                            raise Error("users_last_key")
+                        self.perform(
+                            lambda: users.save_public_keys(
+                                self.sys, username, keys[:index] + keys[index + 1 :]
+                            )
+                        )
+            elif choice == 1:
+                key = self.ask("public_key")
+                if self.confirm(self.t("add_public_ssh_key_for_user", user=username)):
+                    self.perform(lambda: users.add_public_key(self.sys, username, key))
+            else:
+                if not users.password_login_allowed(self.sys):
+                    self.show(self.t("users_password_ssh_disabled"))
+                password = self.administrator_password()
+                if self.confirm(self.t("users_confirm_password", username=username)):
+                    self.perform(
+                        lambda: users.change_password(self.sys, username, password)
+                    )
 
     def main_loop(self):
         entries = [
@@ -2091,7 +3079,7 @@ class UI:
 def bar(percent, width=25):
     percent = max(0.0, min(100.0, float(percent)))
     count = round(width * percent / 100)
-    return "[" + "#" * count + "-" * (width - count) + f"] {percent:5.1f}%"
+    return "[" + "█" * count + "░" * (width - count) + f"] {percent:5.1f}%"
 
 
 def speed_card(result, language="en"):

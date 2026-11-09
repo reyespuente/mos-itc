@@ -3,7 +3,7 @@
 Herramienta de terminal creada por **Reyes Guadalupe Puente Balcazar** como una
 iniciativa en el Instituto Tecnológico de Celaya. Licencia MIT, de libre uso.
 
-Esta es la **versión 0.4.0-beta.1**. Prueba la instalación completa en una VM
+Esta es la **versión 0.5.0-beta.1**. Prueba la instalación completa en una VM
 desechable antes de utilizarla en un VPS con datos reales.
 
 ## Abrir los menús en Linux Mint sin instalar servicios
@@ -59,7 +59,7 @@ conservan. El instalador inicial muestra textos bilingües antes de instalar Pyt
   mantenido por la distribución. No se agrega ningún repositorio externo solo.
 * Los sitios gestionados usan Apache y usuarios Linux/PHP-FPM independientes.
   Esto no equivale a contenedores para ejecutar código de alumnos sin confianza.
-* SFTP restringe los comandos, pero esta beta no crea un chroot.
+* Los usuarios normales usan Bash, su home o el sitio asignado y permisos Linux; no reciben sudo.
 * La importación de sitios existentes es beta y copia archivos: no migra bases,
   certificados ni reglas Apache personalizadas.
 * Los respaldos con Restic deben inicializarse y probarse con un destino real.
@@ -108,7 +108,7 @@ Un fullchain se separa automáticamente. Antes de guardar se revisan la vigencia
 la clave, la cadena y los dominios afectados. Los errores conservan el borrador;
 si Apache no recarga, se recuperan los archivos y el inventario anteriores.
 
-En **Administradores SSH** puedes crear usuarios con carpeta personal, Bash y
+En **Usuarios SSH** puedes crear usuarios con carpeta personal, Bash y
 sudo completo que requiere su contraseña. También puedes cambiar contraseñas
 y agregar claves públicas. Si SSH no permite contraseñas, se exige una clave.
 La app no cambia esa política ni deshabilita root. Comando: `sudo mos-itc users`.
@@ -137,3 +137,5 @@ restaurar una copia elegida a una carpeta nueva.
 
 La [guía de respaldos](docs/BACKUPS.md) explica los campos, qué se incluye y cómo
 verificar una restauración. No se sobrescriben bases o servicios automáticamente.
+
+Las opciones de la versión 0.5 se describen en [Administrar el servidor](docs/ADMINISTRATION.md), incluyendo estudiantes, descargas, ajustes PHP y actualización desde 0.4.

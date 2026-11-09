@@ -1,3 +1,77 @@
+# Validation record — 0.5.0-beta.1
+
+Validated November 9, 2026 (America/Mexico_City). **121 local tests passed**.
+The installed candidate passed all 121 on Debian 13.4 / Python 3.13. Ubuntu
+26.04.1 / Python 3.14 ran 121 with two Apache parser tests skipped because Apache
+was absent. Python 3.9 syntax, compilation, shell syntax and language parity passed.
+GitHub CI for this release remains pending publication.
+
+Download/locking audit on November 9:
+
+* Debian: real signed downloads through Apache HTTP 80 and HTTPS 443, including
+  a managed HTTP vhost with HTTPS redirects. Existing IP/domain responses matched.
+  Altered and expired tokens returned 404, expired files were removed, and the
+  backend listened only on loopback.
+* A temporary real website was created and removed on Debian inside nested
+  operation locks; the temporary website data was erased afterward.
+* Regression tests cover nested lock ownership, exclusion of other processes,
+  release after exceptions, rollback of rejected Apache configuration, idempotent
+  route setup, preservation of legacy links and service/route cleanup on uninstall.
+* Both test instances accepted the application upgrade. No pending SSH change or
+  active MOS operation lock was found during inspection; the historical reported
+  message was not reproduced. Messages now distinguish active operations from
+  SSH changes awaiting verification.
+* This audit focused on downloads, locks, SSH pending-change handling and uninstall;
+  it is not a guarantee that every possible server configuration is supported.
+
+* Upgraded existing 0.4 installations on both disposable EC2 guests. Existing
+  configuration/site/credential file hashes matched before and after; prior code
+  and configuration recovery archives were created.
+* A representative Debian 0.4 fixture included HTTPS static/PHP8.4 sites, a custom
+  certificate, both database engines, database accounts, an SSH administrator and
+  the original automatic profile. Its 22 files matched after upgrade; HTTPS,
+  PHP/FPM, the existing administrator login and both databases remained usable.
+* The corrected account model passed on both EC2 guests: normal Bash SSH,
+  personal home directories, two accounts reading/writing the same site, native
+  SFTP and effective denial of sudo. Existing candidate test accounts were
+  converted without moving their files. No container runtime is required or
+  installed by the release. The home is a starting directory, not confinement.
+  The corrected package was then installed and retested on both rebooted guests:
+  all 115 tests passed on Debian, and Ubuntu retained only the two Apache skips.
+  Existing configuration/site hashes matched exactly across this final upgrade.
+* HTTP and HTTPS downloads passed content checks, strict TLS verification,
+  signature-tampering rejection, revocation, stable-port reuse and expiration.
+  ZIP/tar.gz contents and staging cleanup passed. Test HTTPS used a proper private
+  test CA. Public Internet download reachability behind provider firewalls was not
+  claimed; transfer checks used the guest's loopback listener.
+* Existing 0.4 S3 repositories remained readable. Added a test snapshot, deleted
+  only that new snapshot, pruned and checked the repository; prior snapshots were
+  retained. Older IDrive profiles used runtime compatibility flags without changing
+  stored configuration or passwords. Transient SQL preparation is removed on exit.
+* Both SQL consoles and external local database inspection passed. PostgreSQL
+  deletion with an active query terminated that connection after the SQL safety copy.
+* PHP form changes affected a real FPM site, survived pool regeneration, and were
+  restored to their previous values. Reapplying the legacy automatic profile was refused.
+* Both guests passed protected UFW add/delete, refused SSH denial, Fail2ban live
+  parameter checks and a configurable daily Certbot timer. Actual SSH port changes
+  armed persistent recovery; expiring the test metadata and triggering its service
+  restored port 22 and the exact original SSH files. Control connections survived.
+* Both recovery-point types were listed and inspected. Configuration recovery
+  extracted into a new mode-0700 directory; only a generated test point was deleted.
+* Native SSH main/overview/dashboard screens opened, and terminal resizing through
+  140x42, 110x32, 80x24, 58x20 and 40x15 completed without a traceback. CLI captures
+  are included in assets. Installer Enter cancellation was checked at initial,
+  license and upgrade approvals without creating a recovery point.
+* Published-tag discovery worked without performing an unconfirmed upgrade.
+  The in-app updater's pinned-commit handoff/restart is regression-tested; the
+  public 0.5 download cannot be exercised until its tag is published.
+
+Limits: no production server was changed. Live Let's Encrypt issuance/renewal
+against a public owned domain was not exercised; timer configuration and custom
+certificate replacement were tested. PHP hosting keeps the prior host FPM runtime;
+normal Linux accounts use filesystem permissions, not a jail. Other distributions,
+providers and future upstream versions still require their own acceptance checks.
+
 # Validation record — 0.4.0-beta.1
 
 Validated November 8, 2026 (America/Mexico_City). **98 local tests passed, no

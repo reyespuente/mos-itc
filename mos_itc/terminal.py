@@ -2,6 +2,7 @@
 
 import curses
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -46,6 +47,7 @@ class Terminal:
         self.status = self.t("ui_ready")
         self.status_error = False
         self.title = "main_menu"
+        self.context = {}
         self.original_colors = {}
         self.logo = json.loads((ASSETS / "itc-logo.json").read_text())
         self.ink = {}
@@ -92,6 +94,9 @@ class Terminal:
                 (6, indices[7], indices[0]),
             ]:
                 curses.init_pair(pair, foreground, background)
+            curses.init_pair(
+                12, 114 if curses.COLORS >= 256 else curses.COLOR_GREEN, indices[0]
+            )
             for pair, label, index in zip(range(7, 12), "WGRYH", indices[5:]):
                 curses.init_pair(pair, index, indices[0])
                 self.ink[label] = curses.color_pair(pair)
@@ -108,6 +113,13 @@ class Terminal:
             else 0
         )
         return value | (curses.A_BOLD if bold else 0)
+
+    def resource_style(self, text):
+        value = re.search(r"\]\s*([0-9.]+)%", text)
+        if value:
+            percent = float(value[1])
+            return self.style(6 if percent >= 95 else 4 if percent >= 85 else 12)
+        return self.style(12 if any(char in text for char in "█▇▆▅▄▃▂▁░") else 1)
 
     def put(self, y, x, text, width=None, style=None):
         h, w = self.win.getmaxyx()
@@ -127,15 +139,27 @@ class Terminal:
         self.title = title
         self.win.erase()
         h, w = self.win.getmaxyx()
-        self.put(1, 3, INSTITUTE, style=self.style(1, True))
-        self.put(2, 3, "MOS ITC  /  Manage your Own Server", style=self.style(5, True))
+        self.put(1, 3, "Manage Your Own Server", style=self.style(5, True))
         mode = self.t("ui_preview_short") if self.preview else os.uname().nodename
-        self.put(
-            3,
-            3,
-            f"{DISPLAY_AUTHOR}    ·    {mode}    ·    {VERSION}",
-            style=self.style(2),
-        )
+        line = f"Tool made by ITC - Reyes Puente | {mode} | {self.context.get('public') or '—'} | {VERSION}"
+        if self.context.get("update"):
+            line += (
+                " | "
+                + self.t("app_update_available")
+                + " "
+                + self.context["update"]["tag"]
+            )
+        # The wordmark is shown only when both it and the left title fit.
+        if w >= 110:
+            left = w - 45
+            for dy, text in enumerate(WORDMARK.splitlines()):
+                self.put(dy, left, text, 42, self.style(5, True))
+            self.put(3, 3, line, max(1, left - 5), self.style(2))
+            if len(line) > left - 5:
+                self.put(4, 3, line[left - 5 :], max(1, left - 5), self.style(2))
+        else:
+            for dy, text in enumerate(textwrap.wrap(line, max(1, w - 7))[:3]):
+                self.put(2 + dy, 3, text, style=self.style(2))
         self.put(5, 3, self.t(title), style=self.style(1, True))
         self.put(6, 3, "─" * (w - 7), style=self.style(2))
         self.put(h - 3, 3, "─" * (w - 7), style=self.style(2))
@@ -216,6 +240,8 @@ class Terminal:
                 self.put(8, x, self.t(options[pos]), available, self.style(1, True))
                 y = 10
             description = detail or self.t(options[pos] + ".description")
+            if hasattr(description, "fit"):
+                description = description.fit(available)
             if description == options[pos] + ".description":
                 description = ""
             for line in wrapped(description, available)[: max(0, h - 4 - y)]:
@@ -276,7 +302,7 @@ class Terminal:
             self.positions[title] = pos
 
     def document(self, title, text, buttons=("back",), artwork=False):
-        offset, button = 0, 0
+        offset, button, horizontal = 0, 0, 0
         while True:
             if self.too_small():
                 if self.win.getch() in (27, ord("q")):
@@ -289,11 +315,28 @@ class Terminal:
                 self.draw_logo(8, 3, art_width, h - 13)
                 x = art_width + 7
                 width = w - x - 4
-            lines = wrapped(text, width)
+            content = text.fit(width) if hasattr(text, "fit") else text
+            tabular = "│" in content or bool(
+                re.search(r"^\+[-+]+\+|^-+\+-+", content, re.M)
+            )
+            lines = (
+                clean(content).expandtabs(4).splitlines()
+                if tabular
+                else wrapped(content, width)
+            )
+            horizontal = min(
+                horizontal, max(0, max(map(len, lines), default=0) - width)
+            )
             capacity = max(1, h - 13)
             offset = min(offset, max(0, len(lines) - capacity))
             for y, line in enumerate(lines[offset : offset + capacity], 8):
-                self.put(y, x, line, width, self.style())
+                self.put(
+                    y,
+                    x,
+                    line[horizontal:],
+                    width,
+                    self.resource_style(line),
+                )
             if len(lines) > capacity:
                 self.put(
                     h - 5,
@@ -315,7 +358,11 @@ class Terminal:
             key = self.win.getch()
             if key in (27, ord("q")):
                 return None
-            if key in (9, curses.KEY_RIGHT):
+            if key == ord("h"):
+                horizontal = max(0, horizontal - 8)
+            elif key == ord("l"):
+                horizontal += 8
+            elif key in (9, curses.KEY_RIGHT):
                 button = (button + 1) % len(buttons)
             elif key == curses.KEY_LEFT:
                 button = (button - 1) % len(buttons)
@@ -428,7 +475,12 @@ class Terminal:
                 visible = max(1, height - 12)
                 scroll = max(0, min(scroll, len(lines) - visible))
                 for y, text in enumerate(lines[scroll : scroll + visible], 8):
-                    self.put(y, 3, text, style=self.style(1))
+                    if " ║ " in text:
+                        left, right = text.split(" ║ ", 1)
+                        self.put(y, 3, left, style=self.resource_style(left))
+                        self.put(y, 3 + len(left), " ║ " + right, style=self.style())
+                    else:
+                        self.put(y, 3, text, style=self.resource_style(text))
                 self.put(
                     height - 4, 3, self.t("dashboard_refresh"), style=self.style(2)
                 )
@@ -446,21 +498,20 @@ class Terminal:
 
 
 def dashboard_lines(data, previous, history, services, processes, translate, width=90):
-    def size(value):
-        return (
-            f"{value/1073741824:.2f} GiB"
-            if value >= 1073741824
-            else f"{value/1048576:.1f} MiB"
-        )
+    from .presentation import size
+
+    total_width = width
+    wide = width >= 110
+    width = width // 2 - 2 if wide else width
 
     def gauge(label, percent, detail=""):
-        columns = max(6, min(28, width - 35))
+        columns = max(6, min(28, width - 22 - len(detail)))
         fill = round(columns * max(0, min(100, percent)) / 100)
-        return f"{label:<8} [{'#'*fill}{'-'*(columns-fill)}] {percent:5.1f}%  {detail}"
+        return f"{label:<8} [{'█'*fill}{'░'*(columns-fill)}] {percent:5.1f}%  {detail}"
 
     uptime = int(data.get("uptime", 0))
     lines = [
-        f'{data["host"]}  ·  {data["time"][:19]} UTC',
+        f"{data['host']}  ·  {data['time'][:19]} UTC",
         translate(
             "dashboard_uptime",
             days=uptime // 86400,
@@ -496,26 +547,65 @@ def dashboard_lines(data, previous, history, services, processes, translate, wid
         translate("dashboard_load")
         + ": "
         + " / ".join(f"{n:.2f}" for n in data["load"]),
-        translate("dashboard_cpu_history")
-        + ": "
-        + "".join(" .:-=+*#%@"[min(9, max(0, int(n * 9 / 100)))] for n in history),
         "",
-        translate("dashboard_network"),
+        translate("dashboard_cpu_history") + " · %",
     ]
+    columns = max(12, min(60, width - 10))
+    points = history[-columns:]
+    for level in (100, 80, 60, 40, 20):
+        cells = "".join(
+            " ▁▂▃▄▅▆▇█"[min(8, max(0, math.ceil((value - (level - 20)) * 8 / 20)))]
+            for value in points
+        )
+        lines.append(f"{level:3} │" + cells.ljust(columns) + "│")
+    lines.append("  0 └" + "─" * columns + "┘")
+    lines += ["", translate("dashboard_network")]
     elapsed = data.get("monotonic", 0) - (previous or {}).get("monotonic", 0)
-    for iface, counters in data["network"].items():
+
+    def priority(name):
+        return (
+            (
+                3
+                if name.startswith("veth")
+                else (
+                    2
+                    if name == "lo"
+                    else 1 if name.startswith(("docker", "br-", "mosstudents")) else 0
+                )
+            ),
+            name,
+        )
+
+    interfaces = sorted(data["network"], key=priority)
+    for iface in interfaces[:3]:
+        counters = data["network"][iface]
         old = (previous or {}).get("network", {}).get(iface)
         rates = "—"
         if old and elapsed > 0:
-            rates = f'↓ {max(0,counters["received"]-old["received"])/elapsed/1024:.1f} KiB/s  ↑ {max(0,counters["sent"]-old["sent"])/elapsed/1024:.1f} KiB/s'
+            rates = f"↓ {max(0,counters['received']-old['received'])/elapsed/1024:.1f} KiB/s  ↑ {max(0,counters['sent']-old['sent'])/elapsed/1024:.1f} KiB/s"
         lines.append(
-            f'{iface:<12} {rates}  RX {size(counters["received"])} / TX {size(counters["sent"])}'
+            f"{iface:<12} {rates}  RX {size(counters['received'])} / TX {size(counters['sent'])}"
         )
-    lines += ["", translate("dashboard_services")]
-    lines += [
-        f'{s["name"]:<26} {translate("dashboard_state_"+s["state"])} ({s["detail"]})'
+    if len(interfaces) > 3:
+        lines.append(translate("dashboard_more_interfaces", count=len(interfaces) - 3))
+    right = [translate("dashboard_services")] + [
+        f"{s['name']:<26} {translate('dashboard_state_'+s['state'])} ({s['detail']})"
         for s in services
-    ] or ["—"]
-    lines += ["", translate("dashboard_processes")]
-    lines += [f'{p["pid"]:>7}  {p["name"]:<22} {size(p["rss"])}' for p in processes]
-    return lines
+    ]
+    if not services:
+        right.append("—")
+    right += ["", translate("dashboard_processes")] + [
+        f"{p['pid']:>7}  {p['name']:<22} {size(p['rss'])}" for p in processes
+    ]
+    if wide:
+        left = [part for line in lines for part in wrapped(line, width)]
+        right = [
+            part for line in right for part in wrapped(line, total_width - width - 3)
+        ]
+        return [
+            (left[i] if i < len(left) else "").ljust(width)
+            + " ║ "
+            + (right[i] if i < len(right) else "")
+            for i in range(max(len(left), len(right)))
+        ]
+    return lines + [""] + right

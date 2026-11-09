@@ -47,6 +47,7 @@ def terminal(keys=(), height=32, width=110):
     term.win = Window(keys, height, width)
     term.t = Translator("es")
     term.preview = True
+    term.context = {}
     term.status = "Listo"
     term.status_error = False
     term.positions = {}
@@ -123,8 +124,8 @@ class NavigationTests(unittest.TestCase):
             "".join(term.win.cells.get((y, x), (" ", 0))[0] for x in range(80))
             for y in range(24)
         ]
-        self.assertIn("Instituto Tecnológico de Celaya", lines[1])
-        self.assertIn("Reyes Puente", lines[3])
+        self.assertIn("Manage Your Own Server", lines[1])
+        self.assertIn("Reyes Puente", "\n".join(lines[2:5]))
         self.assertNotIn("Guadalupe", "\n".join(lines))
         self.assertTrue(
             any(
@@ -157,7 +158,17 @@ class UpgradeTests(unittest.TestCase):
                 entry.type = tarfile.SYMTYPE
                 entry.linkname = "/etc/shadow"
                 archive.addfile(entry)
-            with patch.object(recovery, "POINTS", root / "points"):
+
+            def temporary_target(value):
+                path = Path(value)
+                if path.exists():
+                    raise Error("exists")
+                return path
+
+            with (
+                patch.object(recovery, "POINTS", root / "points"),
+                patch.object(recovery, "restore_target", side_effect=temporary_target),
+            ):
                 target = recovery.extract_point(point.name, str(root / "recovered"))
                 self.assertEqual((target / "etc/example.conf").read_bytes(), content)
                 self.assertFalse((target / "etc/link").exists())

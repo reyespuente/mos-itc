@@ -17,9 +17,10 @@ Menús con flechas, sin navegador ni panel web.
 - Instalar y configurar Apache, PHP-FPM y herramientas para tus aplicaciones.
 - Crear sitios, asignar certificados y gestionar HTTPS.
 - Administrar bases MariaDB y PostgreSQL, usuarios y permisos por base.
-- Crear administradores SSH y configurar acceso, firewall y Fail2ban.
+- Crear administradores y usuarios Linux para estudiantes; configurar SSH, firewall y Fail2ban.
 - Configurar respaldos S3, SFTP o FTP/FTPS, elegir horarios y recuperar copias.
-- Ver rendimiento en vivo y ejecutar antivirus.
+- Consultar registros, usar una terminal SQL y descargar copias con enlaces temporales.
+- Ver gráficos de rendimiento en vivo y ejecutar antivirus.
 
 Disponible en español e inglés.
 
@@ -28,8 +29,8 @@ Disponible en español e inglés.
 En el servidor, descarga el instalador de una versión publicada:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/reyespuente/mos-itc/v0.4.0-beta.1/install.sh -o install-mos-itc.sh
-sudo bash install-mos-itc.sh --repo reyespuente/mos-itc --ref v0.4.0-beta.1
+curl -fL https://raw.githubusercontent.com/reyespuente/mos-itc/v0.5.0-beta.1/install.sh -o install-mos-itc.sh
+sudo bash install-mos-itc.sh --repo reyespuente/mos-itc --ref v0.5.0-beta.1
 sudo mos-itc --language es
 ```
 
@@ -47,6 +48,6 @@ del servidor.
 python3 -m mos_itc --dry-run --language es
 ```
 
-[Configurar respaldos](docs/BACKUPS.md) · [Guía completa](docs/GUIDE.md) · [Inicio rápido](LEEME.md) ·
+[Administrar el servidor](docs/ADMINISTRATION.md) · [Configurar respaldos](docs/BACKUPS.md) · [Guía completa](docs/GUIDE.md) · [Inicio rápido](LEEME.md) ·
 [Pruebas realizadas](TEST_RESULTS.md) · [Seguridad](SECURITY.md) ·
 [Contribuir](CONTRIBUTING.md) · [Licencia MIT](LICENSE)

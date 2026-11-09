@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0-beta.1
+
+* Share Apache ports 80/443 for signed downloads through a private loopback backend;
+  retain existing links until expiry instead of silently changing their endpoint.
+* Allow nested operations within their owning thread while excluding other
+  processes; release locks on errors and avoid locking during live website logs.
+* Stop download services and remove their Apache route when uninstalling.
+
+* Reflow inventory tables, show human-readable sizes and add responsive branding.
+* Add host addresses/gateways, resource gauges and a live CPU chart.
+* Add per-domain access/error logs, external local database inspection and SQL consoles.
+* Support confirmed PostgreSQL deletion with active connection termination.
+* Add normal Linux SSH/SFTP accounts with personal/site home directories, shared-site
+  permissions, key management and suspension; no Docker or container dependency.
+* Add signed expiring HTTP(S) downloads, manual ZIP/tar.gz archives, export management
+  and explicit snapshot deletion with pruning and integrity checks.
+* Move SSH into global settings; add PHP forms, system settings, UFW/Fail2ban menus,
+  Certbot renewal schedules and management of both restore-point types.
+* Add confirmed application updates from immutable published-tag commits.
+* Preserve 0.4 data and avoid reapplying its automatic profile; lock before capturing
+  recovery points. Adapt older IDrive profiles without rewriting credentials.
+* Clean transient SQL/archive data and handle download cleanup concurrency.
+
 ## 0.4.0-beta.1
 
 * Add guided S3/S3-compatible, SFTP, FTP/FTPS and existing-Rclone backup profiles,

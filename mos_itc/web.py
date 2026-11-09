@@ -57,9 +57,9 @@ def validate_site(site):
     return site
 
 
-def pool(site):
+def pool(site, defaults=None):
     home = SITES / site["domain"]
-    return f"""[mos-{site['domain']}]
+    content = f"""[mos-{site['domain']}]
 user = {site['user']}
 group = {site['user']}
 listen = /run/php/mos-{site['domain']}.sock
@@ -89,6 +89,15 @@ php_admin_flag[session.cookie_httponly] = on
 php_admin_value[session.cookie_samesite] = Lax
 php_admin_value[date.timezone] = {site.get('timezone', 'UTC')}
 """
+    for key, value in (defaults or {}).items():
+        if key != "date.timezone":
+            content = re.sub(
+                r"^(php_admin_(?:value|flag)\[" + re.escape(key) + r"\]\s*=).*$",
+                lambda m: m[1] + " " + str(value),
+                content,
+                flags=re.M,
+            )
+    return content
 
 
 def tls_paths(sys, site):
@@ -163,6 +172,7 @@ def vhost(sys, site):
   {alias}
 {acme}  RewriteEngine On
   RewriteCond %{{REQUEST_URI}} !^/\\.well-known/acme-challenge/
+  RewriteCond %{{REQUEST_URI}} !^/mos-downloads/
   RewriteRule ^ https://{host}%{{REQUEST_URI}} [R=301,L,NE]
 </VirtualHost>
 """
@@ -212,7 +222,14 @@ def apply_site(sys, site, old=None):
         with sys.transaction(edited):
             sys.write(edited[0], vhost(sys, site), 0o644)
             if site.get("php"):
-                sys.write(paths(site)[1], pool(site), 0o644)
+                sys.write(
+                    paths(site)[1],
+                    pool(
+                        site,
+                        sys.data().get("php_profiles", {}).get(site.get("php"), {}),
+                    ),
+                    0o644,
+                )
             for p in paths(old) if old else []:
                 if p not in paths(site):
                     sys.delete(p)
@@ -275,6 +292,7 @@ def create_site(sys, host, version=None, www=False, laravel=False, timezone="UTC
     ensure_apache(sys)
     sys.mkdir("/srv/mos", 0o755)
     sys.mkdir(SITES, 0o711)
+    sys.run(["chmod", "0711", SITES], mutate=True)
     sys.run(
         [
             "useradd",
@@ -379,7 +397,9 @@ def letsencrypt(sys, site, email):
         "#!/bin/sh\nset -eu\n/usr/sbin/apache2ctl configtest\n/bin/systemctl reload apache2\n",
         0o700,
     )
-    sys.run(["systemctl", "enable", "--now", "certbot.timer"], mutate=True)
+    from .settings import renewal
+
+    renewal(sys, sys.data().get("renewal_time", "03:00"))
 
 
 MAX_PEM_BYTES = 1024 * 1024

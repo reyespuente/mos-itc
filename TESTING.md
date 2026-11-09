@@ -92,3 +92,12 @@ Keep TLS verification enabled; an untrusted certificate must fail. Repeat with
 a supplied trusted CA. File transports must use a compatible Rclone version;
 verify checksum rejection before private runtime installation. The upstream
 component is separate from the APT package.
+
+## 0.5 upgrade and interface acceptance
+
+See TEST_RESULTS.md for the real 0.4→0.5 upgrade, student SSH/SFTP, signed export,
+SQL/FPM and security regressions on both EC2 guests. Test an upgrade over existing
+configuration as well as a clean installer. Compare private hashes without printing
+credentials. Never use an existing production bucket prefix for deletion tests.
+Verify old links survive new exports, expired links fail, and provider firewalls
+permit the selected port before treating a public download as reachable.

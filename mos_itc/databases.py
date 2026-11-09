@@ -319,3 +319,67 @@ def delete_user(system, database, username):
     system.save(data)
     system.delete(path)
     system.audit("Database user deleted: " + username)
+
+
+def inspect(system, database):
+    database = name(database)
+    if database not in {r["database"] for r in inventory(system)}:
+        raise Error("db_unmanaged")
+    table_data = sql(
+        system,
+        "SELECT TABLE_NAME, ENGINE, COALESCE(TABLE_ROWS,0), "
+        "COALESCE(DATA_LENGTH+INDEX_LENGTH,0) FROM information_schema.TABLES "
+        f"WHERE TABLE_SCHEMA='{database}' ORDER BY TABLE_NAME;",
+    )
+    permissions = sql(
+        system,
+        "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES "
+        f"WHERE TABLE_SCHEMA='{database}' ORDER BY GRANTEE,PRIVILEGE_TYPE;",
+    )
+    return table_data, permissions
+
+
+def console(system, database, statement):
+    if database not in {r["database"] for r in inventory(system)}:
+        raise Error("db_unmanaged")
+    return query_result(
+        system,
+        ["mariadb", "--protocol=socket", "--table", "--database", database],
+        "SET SESSION max_statement_time=25; SET SESSION sql_select_limit=1000;\n"
+        + statement,
+    )
+
+
+def query_result(system, arguments, statement):
+    """Spool SQL output privately; do not retain unbounded results in memory."""
+    import subprocess
+    import tempfile
+    from .core import SAFE_ENV
+
+    if system.dry:
+        return ""
+    with tempfile.TemporaryFile(mode="w+t") as output, tempfile.TemporaryFile(
+        mode="w+t"
+    ) as errors:
+        with subprocess.Popen(
+            arguments,
+            stdin=subprocess.PIPE,
+            stdout=output,
+            stderr=errors,
+            text=True,
+            env=SAFE_ENV,
+            start_new_session=True,
+        ) as process:
+            process.mos_process_group = True
+            try:
+                system.communicate(process, "SQL", 30, input=statement)
+            except subprocess.TimeoutExpired:
+                raise Error("sql_timeout") from None
+            if process.returncode:
+                errors.seek(0)
+                raise Error(errors.read(3000))
+        output.seek(0)
+        result = output.read(256 * 1024)
+        if output.read(1):
+            result += "\n[Output truncated at 256 KiB; use LIMIT.]"
+        return result

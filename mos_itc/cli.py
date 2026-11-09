@@ -15,17 +15,32 @@ from .ui import UI
 def uninstall(system):
     if system.exists(STATE / "ssh-pending.json"):
         raise Error("error_confirm_or_roll_back_the_pending_ssh_change")
+    from .transfers import APACHE_ROUTE
+
+    if system.exists(APACHE_ROUTE):
+        with system.transaction([APACHE_ROUTE]):
+            system.delete(APACHE_ROUTE)
+            system.run(["apache2ctl", "configtest"], mutate=True)
+            system.run(["systemctl", "reload", "apache2"], mutate=True)
     backup_labels = [
         path.name[len("mos-") : -len(".timer")]
         for path in Path("/etc/systemd/system").glob("mos-backup-*.timer")
     ]
-    for label in ("metrics", "backup", "clamav", "ssh-recovery", *backup_labels):
-        system.run(
-            ["systemctl", "disable", "--now", f"mos-{label}.timer"],
-            mutate=True,
-            check=False,
-        )
-        for suffix in ("service", "timer"):
+    for label in (
+        "metrics",
+        "backup",
+        "clamav",
+        "ssh-recovery",
+        "downloads",
+        "download-cleanup",
+        *backup_labels,
+    ):
+        for suffix in ("timer", "service"):
+            system.run(
+                ["systemctl", "disable", "--now", f"mos-{label}.{suffix}"],
+                mutate=True,
+                check=False,
+            )
             system.delete(f"/etc/systemd/system/mos-{label}.{suffix}")
     system.run(["systemctl", "daemon-reload"], mutate=True)
     system.audit("MOS application uninstalled; services and retained data preserved")
@@ -140,7 +155,10 @@ def parser():
     )
     sub.add_parser("uninstall")
     internal = sub.add_parser("internal", help="Scheduled systemd tasks")
-    internal.add_argument("action", choices=["metrics", "scan", "ssh-recover"])
+    internal.add_argument(
+        "action",
+        choices=["metrics", "scan", "ssh-recover", "downloads", "download-cleanup"],
+    )
     return p
 
 
@@ -197,6 +215,16 @@ def main(argv=None):
             if args.allow_external_repositories and args.command != "internal":
                 if not ui.confirm("confirm_external_repositories"):
                     return 1
+        if args.command == "internal" and args.action == "download-cleanup":
+            from .transfers import cleanup
+
+            cleanup(system)
+            return 0
+        if args.command == "internal" and args.action == "downloads":
+            from .transfers import serve
+
+            serve()
+            return 0
         # One process at a time; systemd retries on its next run if a task collides.
         # ponytail: global lock; split per-resource locks only if fleet workloads need concurrency.
         recovery = args.command == "internal" and args.action == "ssh-recover"
@@ -336,6 +364,8 @@ def main(argv=None):
                     ops.scan(system)
                 else:
                     ops.recover_ssh(system)
+        if getattr(ui, "restart", False):
+            os.execv("/usr/local/bin/mos-itc", ["mos-itc", "--language", ui.lang])
         return 0
     except (Error, ValueError, OSError) as exc:
         message = exc.render(ui.lang) if isinstance(exc, Error) and ui else str(exc)

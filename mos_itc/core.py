@@ -10,10 +10,12 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.parse import urlparse
 
-VERSION = "0.4.0-beta.1"
+from . import __version__ as VERSION
+
 AUTHOR = "Reyes Guadalupe Puente Balcazar"
 STATE = Path("/var/lib/mos-itc")
 CONF = Path("/etc/mos-itc")
@@ -325,21 +327,41 @@ class System:
             raise
 
 
+_held_locks = threading.local()
+
+
 @contextlib.contextmanager
-def lock(dry=False, path=None):
+def lock(dry=False, path=None, wait=0):
     if dry:
         yield
         return
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(
-        path or STATE / "operation.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
-    )
-    with os.fdopen(fd, "w") as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Error("error_another_mos_operation_is_running") from exc
+    path = Path(path or STATE / "operation.lock").absolute()
+    identity = (os.getpid(), str(path))
+    held = getattr(_held_locks, "paths", None)
+    if held is None:
+        held = _held_locks.paths = set()
+    # A nested action in the same thread already owns the OS lock. Other
+    # threads and processes must still acquire it independently.
+    if identity in held:
         yield
+        return
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise Error("error_another_mos_operation_is_running") from exc
+                time.sleep(0.05)
+        held.add(identity)
+        try:
+            yield
+        finally:
+            held.remove(identity)
 
 
 def os_info():

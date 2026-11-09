@@ -22,11 +22,12 @@ Website accounts do not receive these privileges. Root is not disabled automatic
   permissions are granted to Python or site accounts.
 * PHP runs under separate site accounts and FPM sockets. File permissions,
   restricted Apache overrides and per-site temporary/session paths reduce exposure.
-  This is shared-kernel hosting, **not a container sandbox**. FPM pools and
-  `open_basedir` do not fully isolate hostile code. Untrusted student workloads
-  should use stronger isolation before being offered a hosting service.
+  This PHP hosting path remains on the host, as in version 0.4. FPM pools and `open_basedir` do not fully isolate hostile
+  application code. Use a separate application runtime or VM for untrusted PHP.
 * SFTP-only mode disables shell commands and forwarding; it is not a filesystem
-  chroot. Kernel permissions still govern accessible paths. Site users never get sudo.
+  chroot. Kernel permissions still govern accessible paths. Existing accounts
+  retain their policy on upgrade. Normal SSH/SFTP accounts receive no general sudo; their selected home
+  and file permissions do not constitute a filesystem jail.
 * Custom certificates must match the private key, be current, match assigned
   hostnames and validate against the host trust store with the provided chain.
   Install private organizational CAs into that trust store explicitly if needed.
@@ -57,7 +58,10 @@ They do not capture website data, live database state, or an entire disk.
 ## Database accounts
 
 The database manager changes only MOS-registered databases and accounts. Existing
-external databases are inventory-only. Additional credentials are root-only;
+external local databases support read-only schema/grant inspection without adoption.
+The explicitly confirmed SQL console uses the local administrative account and
+can mutate data; it has bounded output and a query timeout. Queries/results are
+not added to operation history. Additional credentials are root-only;
 website primary MariaDB credentials retain their site-user ownership. SQL password
 statements use stdin and sanitized errors, never process arguments or activity logs.
 Credentials are explicitly revealed on screen and can still be captured by terminal
@@ -88,3 +92,44 @@ The tested official Rclone component can be explicitly installed using HTTPS and
 SHA-256. It does not replace the APT binary or silently update itself. Checksums
 do not constitute signature verification. The component must be root-owned and
 not writable by other users.
+
+## Normal Linux SSH/SFTP accounts
+
+New non-administrator accounts receive no sudo policy or privileged launcher.
+Their home is the selected personal/site directory, with ACL access for shared
+site work. Key and password administration remains in MOS; SSH configuration is
+checked before reload. Root-owned public key files live under
+`/etc/ssh/mos-itc-keys`.
+
+There is no container, chroot or shell sandbox. Users can access other paths when
+Linux filesystem permissions allow it. Website FPM isolation continues to use
+separate accounts, filesystem permissions and open_basedir. Selecting a home is
+not a guarantee of confinement. Existing sudo privileges outside MOS are not
+silently changed when assigning an existing account.
+
+## Temporary exports
+
+Only MOS-managed export files are registered for download. Each URL is signed
+with a root-only random HMAC key and binds the file ID and expiry. No directory
+listing or arbitrary-path handler is provided. The private daemon does not log
+URLs; existing Apache access logs may include them, so keep those logs private.
+The registry and copies are private. Apache terminates HTTPS with an existing
+site's certificate; HTTP requires a separate explicit warning. Anyone holding a valid
+link can download the file until it expires. Provider firewall rules remain the
+administrator's responsibility.
+
+Cleanup and export registration share a bounded metadata lock. Expired downloads
+and abandoned staging files are removed, while retained SQL exports require
+explicit deletion. Apache shares ports 80/443 through a reserved download route;
+the backend listens only on loopback. Existing legacy links keep their listening
+port and expiration until revoked or expired before migration.
+The local download daemon does not replace Restic encryption or a secure transport.
+
+## Application upgrades
+
+The update checker reads tags only from the fixed project repository. The chosen
+tag is resolved to its immutable commit before the HTTPS source download. A
+separate confirmation accepts the upgrade and license. This trusts the project
+repository and GitHub HTTPS; it is not a claim of independently signed releases.
+The installer locks before capturing prior code/configuration and rejects pending
+SSH changes. New features do not automatically reconfigure existing sites.

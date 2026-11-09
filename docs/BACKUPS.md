@@ -163,3 +163,45 @@ un perfil nuevo que conecte el mismo repositorio con su contraseña original.
 Referencias: [Restic](https://restic.readthedocs.io/en/stable/),
 [Rclone S3](https://rclone.org/s3/), [SFTP](https://rclone.org/sftp/) y
 [FTP/FTPS](https://rclone.org/ftp/).
+
+## Archivos para descargar y copias manuales
+
+**Respaldos → Crear respaldo manual ZIP / tar.gz** crea una copia completa de las
+rutas seleccionadas y, opcionalmente, exportaciones SQL. No es incremental.
+`tar.gz` conserva enlaces simbólicos; ZIP contiene archivos regulares. No se
+incluyen los archivos de descarga ni la caché de Restic dentro de la copia.
+
+En **Archivos y descargas locales** aparecen las copias manuales, las copias SQL
+guardadas y los enlaces publicados. El enlace lleva firma HMAC y caduca a los
+60 minutos de crear el archivo por defecto. La duración de nuevas descargas se
+cambia en **Configuración → Descargas**; mostrar otra vez un enlace no renueva su
+vencimiento. Puedes revocarlo borrando el archivo de descarga. Las copias SQL
+originales se conservan hasta que las elimines explícitamente.
+
+Puedes usar un dominio con certificado ya configurado para HTTPS (443) o confirmar
+HTTP por IP pública (80). El enlace tiene la forma `http://IP/mos-downloads/...`.
+Apache comparte sus puertos con los sitios existentes y envía únicamente esa ruta
+al servicio privado, que escucha en 127.0.0.1. No se abren puertos públicos nuevos.
+Apache debe estar instalado y activo; MOS no reemplaza ni detiene Nginx.
+
+El puerto 80/443 elegido debe estar autorizado en UFW y en el grupo de seguridad
+del proveedor. No cierres ese puerto al vencer el enlace: también atiende sitios.
+HTTP no cifra el archivo ni el token. El enlace es privado y quien lo posea puede
+usarlo hasta que venza; tampoco compartas registros HTTP que lo contengan.
+No hay exploración de directorios.
+
+Mientras haya enlaces publicados vigentes no se cambia su dirección/protocolo.
+Los enlaces antiguos con puerto propio se conservan: espera a que caduquen o
+revócalos desde el inventario antes de publicar con el nuevo formato.
+
+La limpieza periódica borra descargas caducadas y temporales abandonados. La
+preparación SQL de un respaldo incremental se elimina al terminar la operación;
+los archivos recuperados y las copias SQL guardadas por el usuario no se eliminan
+como temporales. Incluye las carpetas personales de estudiantes en un perfil
+personalizado si también deseas respaldarlas; no se amplían perfiles anteriores
+sin confirmación.
+
+Dentro de **Copias disponibles y restauración**, selecciona una copia para verla,
+restaurarla o eliminarla. La eliminación requiere confirmación, libera los datos
+que ninguna otra copia necesita y comprueba el repositorio al terminar. Las copias
+anteriores se conservan al actualizar de versión.

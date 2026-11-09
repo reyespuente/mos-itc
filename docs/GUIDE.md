@@ -7,7 +7,9 @@ Created by **Reyes Guadalupe Puente Balcazar** as an initiative at the Instituto
 Tecnológico de Celaya to make server administration easier from one place.
 Free to use under the MIT license. This is not a claim of official ITC endorsement.
 
-**Version: 0.4.0-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
+See [the 0.5 administration guide](ADMINISTRATION.md) for the current menu paths, student accounts, downloads and upgrade behavior.
+
+**Version: 0.5.0-beta.1.** Start on a disposable VM. Offline tests and Ubuntu 26.04 VM acceptance results are included; the complete
 distribution matrix has not yet been validated.
 
 The terminal banner uses ITC's published blue `#1B396A` and green `#117533`:
@@ -89,7 +91,7 @@ full-machine rollback is required. Keep restore points private: `/etc` contains 
 A standalone copy of the installer can fetch a published release automatically:
 
 ```bash
-sudo bash install.sh --repo reyespuente/mos-itc --ref v0.4.0-beta.1
+sudo bash install.sh --repo reyespuente/mos-itc --ref v0.5.0-beta.1
 ```
 
 Download the installer as a file before running it. Interactive input is required;
@@ -208,7 +210,7 @@ preserve existing bind addresses and update a dedicated systemd drop-in. The
 recovery timer restores both the daemon configuration and socket configuration.
 MOS refuses a socket restart if its KillMode could terminate established sessions.
 
-SFTP-only means forced internal SFTP and no forwarding; it is **not a chroot**.
+Legacy SFTP-only mode means forced internal SFTP and no forwarding; it is **not a chroot**. For new student accounts use the isolated workspace workflow in [the administration guide](ADMINISTRATION.md).
 Use stronger isolation before hosting mutually untrusted student workloads.
 
 ### Backups

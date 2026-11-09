@@ -9,11 +9,13 @@ repo=''
 ref=''
 allow_external=false
 upgrade=false
+app_update=false
 while (($#)); do
     case "$1" in
         --repo) repo="${2:?Missing OWNER/REPO}"; shift 2 ;;
         --ref) ref="${2:?Missing tag or commit}"; shift 2 ;;
         --upgrade) upgrade=true; shift ;;
+        --app-update) app_update=true; shift ;;
         --allow-external-repositories) allow_external=true; shift ;;
         --help) echo 'Usage: sudo bash install.sh [--repo OWNER/REPO --ref TAG_OR_SHA] [--allow-external-repositories] [--upgrade]'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -23,7 +25,11 @@ if [[ ! -t 0 ]]; then
     echo 'Interactive terminal required. Download install.sh first, then run it; do not pipe curl into bash.' >&2
     exit 1
 fi
-read -r -p 'Continue with MOS ITC installation? / ¿Continuar? [y/N]: ' answer
+if [[ "$app_update" == true && "$upgrade" != true ]]; then echo '--app-update requires --upgrade'; exit 1; fi
+answer=y
+if [[ "$app_update" != true ]]; then
+    read -r -p 'Install MOS ITC? Type y / Escribe y para continuar. Enter cancels / Enter cancela [y/N]: ' answer
+fi
 [[ "$answer" =~ ^([yY]|[sS])$ ]] || exit 0
 printf '\nInstituto Tecnológico de Celaya\n'
 if [[ -z "${NO_COLOR+x}" ]]; then printf '\033[38;2;17;117;51m'; fi
@@ -64,7 +70,10 @@ fi
 [[ -f "$source_dir/LICENSE" ]] || { echo 'LICENSE missing'; exit 1; }
 cat "$source_dir/LICENSE"
 printf '\n'
-read -r -p 'Accept the MIT license? Type ACCEPT / Aceptar licencia: ' answer
+answer=ACCEPT
+if [[ "$app_update" != true ]]; then
+    read -r -p 'Accept MIT? Type exactly ACCEPT / Escribe ACCEPT para aceptar. Enter cancels / Enter cancela: ' answer
+fi
 [[ "$answer" == 'ACCEPT' ]] || { echo 'License not accepted; nothing installed.'; exit 0; }
 [[ "$EUID" -eq 0 ]] || { echo 'Run: sudo bash install.sh'; exit 1; }
 # Read only distribution-provided identification, not a user-supplied shell config.
@@ -82,7 +91,10 @@ if [[ -e /opt/mos-itc || -e /usr/local/bin/mos || -e /usr/local/bin/mos-itc ]]; 
         echo 'MOS already exists. Close the application, then use --upgrade to preserve sites and settings.'
         exit 1
     fi
-    read -r -p 'Upgrade MOS code while keeping websites and settings? Type UPGRADE: ' answer
+    answer=UPGRADE
+    if [[ "$app_update" != true ]]; then
+        read -r -p 'Keep sites/settings and upgrade? Type UPGRADE / Escribe UPGRADE. Enter cancels / Enter cancela: ' answer
+    fi
     [[ "$answer" == UPGRADE ]] || exit 0
 fi
 # Conservative source allowlist, including Debian822 and disabled-source handling.
@@ -142,9 +154,14 @@ if [[ "$allow_external" == true ]]; then
     read -r -p 'Third-party package sources are your responsibility. Type ALLOW: ' answer
     [[ "$answer" == ALLOW ]] || exit 0
 fi
+# Hold the application lock before capturing a consistent recovery point.
+install -d -m 0700 /var/lib/mos-itc
+exec 9>/var/lib/mos-itc/operation.lock
+flock -n 9 || { echo 'A MOS operation is running. Close MOS and try again.'; exit 1; }
+[[ ! -f /var/lib/mos-itc/ssh-pending.json ]] || { echo 'Confirm or roll back the pending SSH change before upgrading MOS.'; exit 1; }
 # Capture configuration and package inventory BEFORE package/code changes.
 install -d -m 0700 /var/backups/mos-itc/restore-points
-point="/var/backups/mos-itc/restore-points/$(date -u +%Y%m%dT%H%M%SZ)"
+point="/var/backups/mos-itc/restore-points/$(date -u +%Y%m%dT%H%M%S%NZ)"
 install -d -m 0700 "$point"
 tar --create --gzip --file "$point/etc.tar.gz" --directory / etc
 cp --preserve=mode /var/lib/dpkg/status "$point/dpkg-status"
@@ -167,12 +184,10 @@ else
 fi
 install -d -m 0755 /opt /usr/local/bin
 install -d -m 0700 /etc/mos-itc /var/lib/mos-itc
-exec 9>/var/lib/mos-itc/operation.lock
-flock -n 9 || { echo 'A MOS operation is running. Close MOS and try again.'; exit 1; }
 app_stage="$(mktemp -d /opt/.mos-itc-stage-XXXXXXXX)"
 chmod 0755 "$app_stage"
 install -d -m 0755 "$app_stage/mos_itc" "$app_stage/languages" "$app_stage/assets"
-for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py users.py databases.py postgresql.py backups.py; do
+for file in __init__.py __main__.py core.py web.py ops.py ui.py cli.py i18n.py terminal.py recovery.py users.py databases.py postgresql.py backups.py presentation.py network.py settings.py updates.py transfers.py workspaces.py; do
     [[ -f "$source_dir/mos_itc/$file" && ! -L "$source_dir/mos_itc/$file" ]] || { echo "Missing or unsafe file: $file"; exit 1; }
     install -m 0644 "$source_dir/mos_itc/$file" "$app_stage/mos_itc/$file"
 done
@@ -220,3 +235,12 @@ MOTD
 fi
 printf '\nMOS ITC installed. Run: sudo mos-itc\n' 
 printf 'No passwordless sudo rule was created. Existing services were not configured.\n'
+
+if [[ "$upgrade" != true ]]; then
+    flock -u 9
+    printf '\n\033[1;32mMOS ITC — CONFIGURACIÓN INICIAL / INITIAL SETUP\033[0m\n'
+    printf 'Recommended after installing the web stack. You can also run sudo mos-itc later.\n'
+    printf 'Recomendado después de instalar el servidor web. También puedes abrir sudo mos-itc después.\n'
+    read -r -p 'Open setup? Type y / ¿Abrir configuración? Escribe y. Enter skips / Enter omite [y/N]: ' answer
+    if [[ "$answer" =~ ^([yY]|[sS])$ ]]; then /usr/local/bin/mos-itc configure; fi
+fi

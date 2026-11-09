@@ -73,7 +73,20 @@ WantedBy=timers.target
     sys.run(["systemctl", "enable", "--now", f"mos-{label}.timer"], mutate=True)
 
 
+def profile_applied(system):
+    data = system.data()
+    return bool(
+        data.get(
+            "automatic_configuration_applied",
+            data.get("configured_at")
+            or (data.get("hostname") and data.get("timezone")),
+        )
+    )
+
+
 def auto_configure(sys, zone, hostname, default_php=None):
+    if profile_applied(sys):
+        raise Error("settings_already_configured")
     timezone(zone)
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", hostname):
         raise Error("error_invalid_hostname")
@@ -153,7 +166,14 @@ Header always set Referrer-Policy "strict-origin-when-cross-origin"
         )
         sys.run(["systemctl", "enable", "--now", "clamav-freshclam"], mutate=True)
     data = sys.data()
-    data.update({"timezone": zone, "hostname": hostname})
+    data.update(
+        {
+            "timezone": zone,
+            "hostname": hostname,
+            "configured_at": stamp(),
+            "automatic_configuration_applied": True,
+        }
+    )
     sys.save(data)
     sys.audit("Production profile applied")
 
@@ -162,6 +182,20 @@ def ssh_ports(sys):
     output = sys.run(["/usr/sbin/sshd", "-T"], check=False)
     ports = re.findall(r"^port (\d+)$", output, re.M)
     return sorted(set(ports)) or ["22"]
+
+
+def restart_fail2ban(system):
+    system.run(["systemctl", "restart", "fail2ban"], mutate=True)
+    if system.dry:
+        return
+    for _ in range(30):
+        if (
+            "pong"
+            in system.run(["fail2ban-client", "ping"], check=False, timeout=3).lower()
+        ):
+            return
+        time.sleep(0.2)
+    raise Error("fail2ban_start_failed")
 
 
 def security(sys, ports=None):
@@ -186,7 +220,7 @@ port = {','.join(ports)}
             0o644,
         )
     sys.run(["systemctl", "enable", "--now", "fail2ban"], mutate=True)
-    sys.run(["systemctl", "restart", "fail2ban"], mutate=True)
+    restart_fail2ban(sys)
     for port in ports:
         sys.run(["ufw", "allow", port + "/tcp"], mutate=True)
     for port in ("80/tcp", "443/tcp"):
@@ -526,6 +560,7 @@ def dashboard_services(system):
             "mos-metrics.timer",
         ],
         check=False,
+        timeout=5,
     )
     services = []
     for block in output.strip().split("\n\n"):

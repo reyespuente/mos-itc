@@ -286,11 +286,12 @@ def dump(system, database):
     return str(target)
 
 
-def remove(system, database):
+def remove(system, database, force=False):
     database = require_database(system, database)
     backup = dump(system, database)
-    # No FORCE: active sessions block deletion rather than being killed.
-    sql(system, f'DROP DATABASE "{database}";', True)
+    # FORCE is available only after the administrator explicitly confirms it.
+    suffix = " WITH (FORCE)" if force else ""
+    sql(system, f'DROP DATABASE "{database}"{suffix};', True)
     roles = groups(database)
     data = system.data()
     data["postgresql_databases"].pop(database)
@@ -320,3 +321,48 @@ def delete_user(system, database, username):
     system.save(data)
     system.delete(path)
     system.audit("PostgreSQL user deleted: " + username)
+
+
+def inspect(system, database):
+    database = name(database)
+    if database not in {r["database"] for r in inventory(system)}:
+        raise Error("db_unmanaged")
+    result = sql(
+        system,
+        "SELECT schemaname||'.'||relname,n_live_tup,pg_total_relation_size(relid) "
+        "FROM pg_stat_user_tables ORDER BY schemaname,relname;",
+        database=database,
+    )
+    permissions = sql(
+        system,
+        "SELECT grantee,privilege_type FROM information_schema.role_table_grants "
+        "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
+        "ORDER BY grantee,privilege_type;",
+        database=database,
+    )
+    return result, permissions
+
+
+def console(system, database, statement):
+    if database not in {r["database"] for r in inventory(system)}:
+        raise Error("db_unmanaged")
+    from .databases import query_result
+
+    return query_result(
+        system,
+        [
+            "runuser",
+            "-u",
+            "postgres",
+            "--",
+            "psql",
+            "-X",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "-P",
+            "pager=off",
+            "--dbname",
+            database,
+        ],
+        "SET statement_timeout=25000;\n" + statement,
+    )

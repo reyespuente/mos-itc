@@ -353,7 +353,7 @@ def create(
     base = folder(identifier)
     paths = validate_sources(paths, databases)
     if str(SITES) in paths and not system.exists(SITES):
-        system.mkdir(SITES)
+        system.mkdir(SITES, 0o711)
     if kind == "rclone":
         remote = text(fields["repository"])
         if not re.fullmatch(
@@ -436,7 +436,21 @@ def environment(system, profile):
         ),
         RCLONE_CONFIG=str(base / "rclone.conf"),
         RESTIC_CACHE_DIR=str(STATE / "restic-cache"),
+        RCLONE_RETRIES="2",
+        RCLONE_LOW_LEVEL_RETRIES="3",
+        RCLONE_CONTIMEOUT="10s",
+        RCLONE_TIMEOUT="60s",
     )
+    if profile["repository"].startswith("rclone:"):
+        parsed = configparser.ConfigParser(interpolation=None)
+        parsed.read_string(system.read(base / "rclone.conf"))
+        remote = profile["repository"].split(":", 2)[1]
+        host = urlsplit(parsed.get(remote, "endpoint", fallback="")).hostname or ""
+        if re.search(r"(?:^|\.)idrivee2(?:-\d+)?\.com$", host.lower()):
+            # Adapt legacy profiles at runtime; never rewrite stored credentials.
+            env.update(
+                RCLONE_S3_UPLOAD_CUTOFF="0", RCLONE_S3_USE_MULTIPART_ETAG="false"
+            )
     if system.exists(base / "ca.pem"):
         env["RCLONE_CA_CERT"] = str(base / "ca.pem")
     private = rclone_program(system)
@@ -544,7 +558,7 @@ def record(system, profile, details):
 def snapshots(system, profile):
     with repository_lock(system, profile):
         return json.loads(
-            run_restic(system, profile, ["snapshots", "--json"], 300) or "[]"
+            run_restic(system, profile, ["snapshots", "--json"], 90) or "[]"
         )
 
 
@@ -658,6 +672,12 @@ def restore_target(target):
 
 def operate(system, identifier, action, target=None, snapshot="latest"):
     profile = load(system, identifier)
+    if action in ("restore", "forget") and not re.fullmatch(
+        r"[a-f0-9]{8,64}|latest", snapshot
+    ):
+        raise Error("backup_invalid_field")
+    if action == "forget" and snapshot == "latest":
+        raise Error("backup_invalid_field")
     if action == "restore":
         target = restore_target(target or "/srv/mos-restore")
         if snapshot != "latest" and not re.fullmatch(r"[a-f0-9]{8,64}", snapshot):
@@ -760,6 +780,9 @@ def operate(system, identifier, action, target=None, snapshot="latest"):
                         180 if action == "init" else 120 if action == "unlock" else 7200
                     ),
                 )
+            elif action == "forget":
+                output = run_restic(system, profile, ["forget", snapshot, "--prune"])
+                output += run_restic(system, profile, ["check"])
             elif action == "locks":
                 output = run_restic(
                     system, profile, ["list", "locks", "--no-lock"], 120
@@ -806,6 +829,11 @@ def operate(system, identifier, action, target=None, snapshot="latest"):
             )
             record(system, profile, info)
             raise
+        finally:
+            if action == "backup" and not system.dry:
+                stage = STATE / "backup-staging" / profile["id"]
+                if stage.is_dir() and not stage.is_symlink():
+                    shutil.rmtree(stage)
 
 
 def save_sources(system, profile, paths, databases):
